@@ -84,7 +84,7 @@ Secrets of the repository (Settings → Secrets → Actions):
 | Secret | What |
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The update key (set). Its public half is in `tauri.conf.json`; keep the private one backed up (it was generated into `~/.isothrum/updater.key`). |
-| `WEBSITE_REPO_TOKEN` | A read-only token for `isoloom/isothrum-website` while it is private (the editor is built from it). |
+| `WEBSITE_REPO_TOKEN` | A read-only token for `Isothrum/isothrum-website` while it is private (the editor is built from it). |
 | `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` | The Developer ID Application certificate (.p12, base64), its password, its name. |
 | `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | Notarization: the Apple ID, an app-specific password, the team. |
 | `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` | The code-signing certificate (.pfx, base64) and its password. |

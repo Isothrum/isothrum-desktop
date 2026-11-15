@@ -37,7 +37,7 @@ Set these under **Settings → Secrets and variables → Actions**. None is prin
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | The updater signing key (minisign). Signs each update bundle so the installed app accepts the update. Its **public** half is in `tauri.conf.json` under `plugins.updater.pubkey` and the two must match. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password set when the key was generated (empty string if the key has none — still set the secret). |
-| `WEBSITE_REPO_TOKEN` | A read-only token for `isoloom/isothrum-website`, from which the bundled editor is built. Needed only while that repository is private; once public, the workflow's default `github.token` is enough. |
+| `WEBSITE_REPO_TOKEN` | A read-only token for `Isothrum/isothrum-website`, from which the bundled editor is built. Needed only while that repository is private; once public, the workflow's default `github.token` is enough. |
 
 If `TAURI_SIGNING_PRIVATE_KEY` is absent the build still succeeds, but it produces **no** update
 signatures or `latest.json`, so the auto-updater cannot verify an update. A build like that is fine
