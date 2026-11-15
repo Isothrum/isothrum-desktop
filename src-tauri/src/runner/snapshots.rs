@@ -65,7 +65,7 @@ pub fn take_snapshot(
     let stamp = unique_stamp(&list, machine, created);
     let image = match runtime(dir) {
         Runtime::Docker => commit_container(dir, lab, machine, label, &stamp)?,
-        rt => save_vm(dir, rt, machine, &stamp)?,
+        Runtime::Vagrant => save_vm(dir, machine, &stamp)?,
     };
     let snap = Snapshot {
         id: format!("{machine}-{stamp}"),
@@ -110,15 +110,9 @@ fn commit_container(
 }
 
 /// Saves a VM with Vagrant's own snapshot (the provider's), named like the record.
-fn save_vm(dir: &Path, rt: Runtime, machine: &str, stamp: &str) -> Result<String, RunError> {
-    let spec = lab_spec(dir)?;
-    if crate::vms::in_host(&spec, rt, machine) {
-        return Err(RunError::Spec(
-            "snapshots of a container in a lab with VMs come later: snapshot its VMs".into(),
-        ));
-    }
+fn save_vm(dir: &Path, machine: &str, stamp: &str) -> Result<String, RunError> {
     let name = format!("{machine}-{stamp}");
-    crate::vms::snapshot_save(dir, rt, machine, &name)?;
+    crate::vms::snapshot_save(dir, machine, &name)?;
     Ok(format!("vagrant:{name}"))
 }
 
@@ -132,9 +126,9 @@ pub fn use_snapshot(dir: &Path, machine: &str, id: Option<&str>) -> Result<Strin
         return Err(RunError::Spec(format!("no snapshot `{id}` of `{machine}`")));
     }
     // A VM goes back to the snapshot's state and carries on from there: nothing to undo later.
-    let out = if let rt @ (Runtime::Vagrant | Runtime::Hybrid) = runtime(dir) {
+    let out = if runtime(dir) == Runtime::Vagrant {
         match id {
-            Some(id) => crate::vms::snapshot_restore(dir, rt, machine, id)?,
+            Some(id) => crate::vms::snapshot_restore(dir, machine, id)?,
             None => return Ok(String::new()),
         }
     } else {
@@ -170,8 +164,8 @@ pub fn delete_snapshot(dir: &Path, id: &str) -> Result<(), RunError> {
         )));
     }
     let snap = list.remove(i);
-    if let rt @ (Runtime::Vagrant | Runtime::Hybrid) = runtime(dir) {
-        crate::vms::snapshot_delete(dir, rt, &snap.machine, &snap.id)?;
+    if runtime(dir) == Runtime::Vagrant {
+        crate::vms::snapshot_delete(dir, &snap.machine, &snap.id)?;
         return save_snapshots(dir, &list);
     }
     let _ = run(

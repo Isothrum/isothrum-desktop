@@ -44,9 +44,8 @@ pub fn capture_script(prefix: &str) -> String {
 pub struct CapturePlan {
     pub container: String,
     pub prefix: String,
-    /// In a lab with VMs: the lab's folder, its runtime, the machine, and whether it's a
-    /// container in the Docker host VM.
-    pub vm: Option<(PathBuf, Runtime, String, bool)>,
+    /// In a lab with VMs: the lab's folder and the machine.
+    pub vm: Option<(PathBuf, String)>,
 }
 
 /// Picks the machine to capture from: on `network`, the first one Isoloom attached to it.
@@ -62,7 +61,7 @@ pub fn plan_capture(dir: &Path, spec: &Spec, network: &str) -> Result<CapturePla
         .ok_or_else(|| RunError::Spec(format!("`{}` isn't an IPv4 block", net.cidr)))?;
     match runtime(dir) {
         Runtime::Docker => docker_plan(dir, spec, network, prefix),
-        rt => vm_plan(dir, spec, rt, network, prefix),
+        Runtime::Vagrant => vm_plan(dir, spec, network, prefix),
     }
 }
 
@@ -70,7 +69,6 @@ pub fn plan_capture(dir: &Path, spec: &Spec, network: &str) -> Result<CapturePla
 fn vm_plan(
     dir: &Path,
     spec: &Spec,
-    rt: Runtime,
     network: &str,
     prefix: String,
 ) -> Result<CapturePlan, RunError> {
@@ -80,11 +78,10 @@ fn vm_plan(
         .find(|(_, m)| m.networks.contains_key(network))
         .map(|(name, _)| name.clone())
         .ok_or_else(|| RunError::Spec(format!("no machine is on `{network}`")))?;
-    let in_host = crate::vms::in_host(spec, rt, &machine);
     Ok(CapturePlan {
         container: String::new(),
         prefix,
-        vm: Some((dir.to_path_buf(), rt, machine, in_host)),
+        vm: Some((dir.to_path_buf(), machine)),
     })
 }
 
@@ -118,14 +115,8 @@ fn docker_plan(
 /// The capture process: tcpdump in the machine's network namespace, pcap on stdout. On Docker,
 /// its container is called `name`, so that stopping the capture can remove it.
 pub fn capture_command(plan: &CapturePlan, name: &str) -> Command {
-    if let Some((dir, rt, machine, in_host)) = &plan.vm {
-        return crate::vms::capture_command(
-            dir,
-            *rt,
-            machine,
-            *in_host,
-            &capture_script(&plan.prefix),
-        );
+    if let Some((dir, machine)) = &plan.vm {
+        return crate::vms::capture_command(dir, machine, &capture_script(&plan.prefix));
     }
     let mut c = Command::new("docker");
     c.args([
