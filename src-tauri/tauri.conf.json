@@ -40,7 +40,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBMjkyQTU0NEFFNTZDRDAKUldUUWJPVktWQ29wMmhOcGlla3F4bXVvRkdvSTRDL3NpRVRrUHZzajVJZGl0RXJsT1RRYkNSSVoK",
       "endpoints": [
-        "https://github.com/isoloom/isothrum-desktop/releases/latest/download/latest.json"
+        "https://github.com/Isothrum/isothrum-desktop/releases/latest/download/latest.json"
       ]
     }
   }
