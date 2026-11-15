@@ -43,8 +43,8 @@ The Isothrum editor in a window, plus what a browser can't do: **run a lab on th
 - **Capture traffic** on a LAN or a cable: a throwaway container (`nicolaka/netshoot`) joins
   the network namespace of a machine on that segment, finds the interface by its address, and
   streams `tcpdump` live into Wireshark, or into a `.pcap` file when Wireshark isn't installed.
-  In a lab with VMs, `tcpdump` runs in a VM on the segment over `vagrant ssh` (installed if
-  missing), or for a container, in the capture image on the Docker host VM.
+  In a lab of VMs, `tcpdump` runs in a VM on the segment over `vagrant ssh` (installed if
+  missing).
 - **Updates**: the app checks GitHub's latest release (signed with the app's update key) and
   offers to restart on a newer one.
 
