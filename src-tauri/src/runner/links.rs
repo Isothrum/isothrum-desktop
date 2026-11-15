@@ -188,14 +188,13 @@ fn set_link(
                 )?;
             }
         }
-        rt => {
-            let in_host = crate::vms::in_host(spec, rt, machine);
+        Runtime::Vagrant => {
             run(
-                crate::vms::in_namespace(dir, rt, machine, in_host, &script),
+                crate::vms::ssh_root(dir, machine, &script),
                 "Setting the port",
             )?;
             if up {
-                crate::vms::restore_routes(dir, rt, machine, in_host);
+                crate::vms::restore_routes(dir, machine);
             }
         }
     }

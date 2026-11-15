@@ -10,9 +10,9 @@ use crate::lab_files;
 use crate::tools::has;
 
 /// The runtime that fits the lab and Isoloom's files for it: Docker when every machine has a
-/// container form, else Vagrant (every machine a VM), else hybrid (both).
+/// container form, else Vagrant (every machine a VM).
 pub fn generated(lab: &Lab) -> Result<(Runtime, Vec<GeneratedFile>), RunError> {
-    [Runtime::Docker, Runtime::Vagrant, Runtime::Hybrid]
+    [Runtime::Docker, Runtime::Vagrant]
         .into_iter()
         .find_map(|rt| {
             isoloom_targets::generate(lab, rt.target())
@@ -29,7 +29,7 @@ pub fn generated(lab: &Lab) -> Result<(Runtime, Vec<GeneratedFile>), RunError> {
 }
 
 /// Checks the spec and writes it with its generated files into `dir`: Docker's when every machine
-/// is a container, else Vagrant's (only VMs) or the hybrid output's (VMs and containers).
+/// is a container, else Vagrant's (every machine a VM).
 /// `own`: the lab's own files (provisioning scripts, appliance configurations), at the paths
 /// isoloom.yml gives them (relative, inside the lab's folder).
 pub fn prepare(dir: &Path, yaml: &str, own: &[(String, String)]) -> Result<Spec, RunError> {
@@ -70,8 +70,8 @@ fn valid_lab(yaml: &str) -> Result<Lab, RunError> {
 
 /// Starts the lab; the links suspended before it was started again stay cut.
 pub fn up(dir: &Path) -> Result<String, RunError> {
-    let mut out = if let rt @ (Runtime::Vagrant | Runtime::Hybrid) = runtime(dir) {
-        crate::vms::up(dir, rt)?
+    let mut out = if runtime(dir) == Runtime::Vagrant {
+        crate::vms::up(dir)?
     } else {
         run(
             compose(dir, &["up", "-d", "--wait", "--remove-orphans"]),
@@ -88,8 +88,8 @@ pub fn up(dir: &Path) -> Result<String, RunError> {
 
 /// Stops the lab: its machines are gone, and its suspended links with them.
 pub fn down(dir: &Path) -> Result<String, RunError> {
-    let out = if let rt @ (Runtime::Vagrant | Runtime::Hybrid) = runtime(dir) {
-        crate::vms::down(dir, rt)?
+    let out = if runtime(dir) == Runtime::Vagrant {
+        crate::vms::down(dir)?
     } else {
         run(
             compose(dir, &["down", "--volumes", "--remove-orphans"]),
@@ -103,8 +103,8 @@ pub fn down(dir: &Path) -> Result<String, RunError> {
 
 /// The lab's services and their state, as `docker compose ps` reports them (one JSON per line).
 pub fn status(dir: &Path) -> Result<String, RunError> {
-    if let rt @ (Runtime::Vagrant | Runtime::Hybrid) = runtime(dir) {
-        return crate::vms::status(dir, rt);
+    if runtime(dir) == Runtime::Vagrant {
+        return crate::vms::status(dir);
     }
     run(
         compose(dir, &["ps", "--all", "--format", "json"]),
@@ -132,6 +132,7 @@ machines:
     app: { image: "alpine:3.20" }
 "#;
 
+    /// A container machine with an OS (a VM form too) beside a Windows VM: Vagrant runs both.
     const WITH_VM: &str = r#"
 version: 1
 name: mixed
@@ -140,7 +141,7 @@ networks:
 machines:
   a:
     networks: { office: 10 }
-    app: { image: "alpine:3.20" }
+    os: debian@12
   b:
     networks: { office: 11 }
     os: windows-server@2022
@@ -166,8 +167,8 @@ machines:
 
     /// The lab the editor's compiler writes for a drawing.
     fn compiled(topology: &str) -> String {
-        let topo: isothrum_compiler::Topology = serde_json::from_str(topology).unwrap();
-        isothrum_compiler::compile(&topo).unwrap().into_parts().0
+        let topo: isoloom_topology::Topology = serde_json::from_str(topology).unwrap();
+        isoloom_topology::compile(&topo).unwrap().into_parts().0
     }
 
     #[test]
@@ -191,22 +192,21 @@ machines:
     }
 
     #[test]
-    fn a_drawn_service_vm_falls_back_from_docker_to_the_vms() {
+    fn a_drawn_service_vm_runs_on_vagrant_without_a_plain_image_beside_it() {
         // Its steps install a service (a port) and nothing says how it runs in the foreground:
-        // Isoloom refuses it as a container, so the lab runs with VMs and containers (hybrid).
+        // Isoloom refuses it as a container. The drawn containers are plain images (the compiler
+        // writes `app.image`), which have no VM form: no local target runs the lab, and the app
+        // says to export it.
         let yaml = compiled(
             r#"{"name":"drawn","networks":{"office":{"cidr":"10.10.1.0/24"}},"nodes":{
               "web":{"kind":{"container":{"image":"nginx:1.27-alpine"}},"services":[{"port":80,"protocol":"http"}],"networks":{"office":null}},
               "db":{"kind":{"vm":{"os":"debian@12","provision":["provision/db.sh"]}},"services":[{"port":5432}],"networks":{"office":null}},
               "user":{"kind":{"container":{"image":"alpine:3.20","idle":true}},"access":true,"networks":{"office":null}}}}"#,
         );
-        let (rt, files) = generated(&lab_of(&yaml).unwrap()).unwrap();
-        assert_eq!(rt, Runtime::Hybrid);
-        assert!(
-            files
-                .iter()
-                .any(|f| f.path == ".isoloom/hybrid/Vagrantfile")
-        );
+        match generated(&lab_of(&yaml).unwrap()) {
+            Err(RunError::NotDocker(why)) => assert!(why.contains("export it"), "{why}"),
+            other => panic!("{:?}", other.map(|(rt, _)| rt)),
+        }
         // Only VMs: Vagrant.
         let vms = compiled(
             r#"{"name":"drawn","networks":{"office":{"cidr":"10.10.1.0/24"}},"nodes":{
@@ -220,23 +220,27 @@ machines:
     #[test]
     fn a_lab_with_vms_runs_with_vagrant() {
         let (rt, files) = generated(&lab_of(WITH_VM).unwrap()).unwrap();
-        assert_eq!(rt, Runtime::Hybrid);
+        assert_eq!(rt, Runtime::Vagrant);
         assert!(
             files
                 .iter()
-                .any(|f| f.path == ".isoloom/hybrid/Vagrantfile")
+                .any(|f| f.path == ".isoloom/vagrant/Vagrantfile")
         );
-        let only_vm = WITH_VM.replace(
+        // A plain image has no VM form: beside a Windows VM, no target runs the lab, and
+        // Isoloom says why.
+        let image = WITH_VM.replace(
+            "    os: debian@12\n",
             "    app: { image: \"alpine:3.20\" }\n",
-            "    os: windows@11\n",
         );
-        let (rt, _) = generated(&lab_of(&only_vm).unwrap()).unwrap();
-        assert_eq!(rt, Runtime::Vagrant);
+        match prepare(&temp("image"), &image, &[]) {
+            Err(RunError::Spec(why)) => assert!(why.contains("no target is possible"), "{why}"),
+            other => panic!("{other:?}"),
+        }
         // Prepared: the runtime is recorded and the Vagrantfile found (when Vagrant is installed).
         let dir = temp("vm");
         match prepare(&dir, WITH_VM, &[]) {
             Ok(_) => {
-                assert_eq!(runtime(&dir), Runtime::Hybrid);
+                assert_eq!(runtime(&dir), Runtime::Vagrant);
                 assert!(prepared(&dir));
             }
             Err(e) => assert!(!has("vagrant") && e.to_string().contains("Vagrant"), "{e}"),

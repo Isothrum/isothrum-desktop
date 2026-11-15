@@ -6,8 +6,8 @@
 //! the interface on that network, and streams `tcpdump` to Wireshark (or to a `.pcap` file):
 //! GNS3's "capture on a link", for a lab of containers.
 //!
-//! A lab with VMs runs through Isoloom's Vagrant output, or its hybrid one when it mixes VMs and
-//! containers: `vms.rs`. The lab's folder records which (`runtime`).
+//! A lab with VMs runs through Isoloom's Vagrant output, every machine a VM: `vms.rs`. The lab's
+//! folder records which (`runtime`).
 
 mod capture;
 mod display;
@@ -28,7 +28,7 @@ pub use display::open_display;
 pub use lifecycle::{down, prepare, status, up};
 pub use links::{Link, editor_links, link_action, suspended_links};
 pub use live::{EnvironmentLive, environment_live};
-pub use machines::{SHELL, console_command, container, machine_action};
+pub use machines::{console_command, container, machine_action};
 pub use snapshots::{Snapshot, delete_snapshot, snapshots, take_snapshot, use_snapshot};
 
 #[derive(Debug)]
@@ -58,13 +58,12 @@ impl std::fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
-/// How a lab runs: Docker Compose, or Vagrant (only VMs, or VMs and a Docker host VM for the
-/// containers).
+/// How a lab runs: Docker Compose, or Vagrant (every machine a VM, a container machine in its VM
+/// form).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Runtime {
     Docker,
     Vagrant,
-    Hybrid,
 }
 
 impl Runtime {
@@ -73,7 +72,6 @@ impl Runtime {
         match self {
             Runtime::Docker => Target::Docker,
             Runtime::Vagrant => Target::Vagrant,
-            Runtime::Hybrid => Target::Hybrid,
         }
     }
 
@@ -82,7 +80,6 @@ impl Runtime {
         match self {
             Runtime::Docker => "docker",
             Runtime::Vagrant => "vagrant",
-            Runtime::Hybrid => "hybrid",
         }
     }
 }
@@ -96,8 +93,10 @@ pub fn runtime(dir: &Path) -> Runtime {
         .unwrap_or_default()
         .trim()
     {
-        "vagrant" => Runtime::Vagrant,
-        "hybrid" => Runtime::Hybrid,
+        // "hybrid": a folder an earlier version prepared (Isoloom's hybrid output, gone in 3.0).
+        // Its files aren't Vagrant's own folder's, so it reads as not prepared: started again,
+        // it is prepared anew.
+        "vagrant" | "hybrid" => Runtime::Vagrant,
         _ => Runtime::Docker,
     }
 }
@@ -106,7 +105,7 @@ pub fn runtime(dir: &Path) -> Runtime {
 pub fn prepared(dir: &Path) -> bool {
     match runtime(dir) {
         Runtime::Docker => dir.join(".isoloom/docker/compose.yml").is_file(),
-        rt => crate::vms::dir(dir, rt).join("Vagrantfile").is_file(),
+        Runtime::Vagrant => crate::vms::dir(dir).join("Vagrantfile").is_file(),
     }
 }
 

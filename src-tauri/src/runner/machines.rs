@@ -34,8 +34,8 @@ pub fn console_command(dir: &Path, spec: &Spec, machine: &str) -> Result<Console
         .machines
         .get(machine)
         .ok_or_else(|| RunError::Spec(format!("no machine named `{machine}`")))?;
-    if let rt @ (Runtime::Vagrant | Runtime::Hybrid) = runtime(dir) {
-        return Ok(crate::vms::console_command(dir, spec, rt, machine));
+    if runtime(dir) == Runtime::Vagrant {
+        return Ok(crate::vms::console_command(dir, machine));
     }
     let id = container(dir, machine)?;
     if m.docker.as_ref().is_some_and(|d| d.appliance.is_some()) {
@@ -101,8 +101,8 @@ pub fn machine_action(
     if !spec.machines.contains_key(machine) {
         return Err(RunError::Spec(format!("no machine named `{machine}`")));
     }
-    let out = if let rt @ (Runtime::Vagrant | Runtime::Hybrid) = runtime(dir) {
-        crate::vms::action(dir, spec, rt, machine, action)?
+    let out = if runtime(dir) == Runtime::Vagrant {
+        crate::vms::action(dir, machine, action)?
     } else {
         compose_action(dir, machine, action)?
     };

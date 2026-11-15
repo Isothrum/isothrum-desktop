@@ -27,10 +27,7 @@ pub fn open_display(dir: &Path, spec: &Spec, machine: &str) -> Result<String, Ru
     }
     match runtime(dir) {
         Runtime::Docker => container_display(dir, machine),
-        rt if crate::vms::in_host(spec, rt, machine) => Err(RunError::Spec(format!(
-            "`{machine}` is a container in a lab with VMs: open its console instead"
-        ))),
-        rt => vm_display(dir, rt, machine),
+        Runtime::Vagrant => vm_display(dir, machine),
     }
 }
 
@@ -145,10 +142,8 @@ fn container_display(dir: &Path, machine: &str) -> Result<String, RunError> {
 }
 
 /// A VM's screen: VirtualBox's window, or libvirt's VNC/SPICE display.
-fn vm_display(dir: &Path, rt: Runtime, machine: &str) -> Result<String, RunError> {
-    let state = crate::vms::dir(dir, rt)
-        .join(".vagrant/machines")
-        .join(machine);
+fn vm_display(dir: &Path, machine: &str) -> Result<String, RunError> {
+    let state = crate::vms::dir(dir).join(".vagrant/machines").join(machine);
     let id = |provider: &str| {
         std::fs::read_to_string(state.join(provider).join("id"))
             .ok()
