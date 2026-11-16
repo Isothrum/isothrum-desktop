@@ -142,18 +142,30 @@ fn compose_action(dir: &Path, machine: &str, action: &str) -> Result<String, Run
     }
 }
 
+/// The Compose service that sets a machine's routes, as Isoloom names it (3.0:
+/// `isoloom-routes-<machine>`, a prefix no machine's name can take).
+pub fn routes_sidecar(machine: &str) -> String {
+    format!("isoloom-routes-{machine}")
+}
+
 /// The machine and its network sidecar, as Compose services.
 pub(super) fn with_sidecar(dir: &Path, machine: &str) -> Result<Vec<String>, RunError> {
     let services = run(
         compose(dir, &["config", "--services"]),
         "Reading the lab's services",
     )?;
-    let sidecar = format!("{machine}-routes");
+    Ok(machine_services(&services, machine))
+}
+
+/// The machine and, when the lab has one (`services`: `docker compose config --services`), its
+/// network sidecar.
+fn machine_services(services: &str, machine: &str) -> Vec<String> {
+    let sidecar = routes_sidecar(machine);
     let mut out = vec![machine.to_string()];
     if services.lines().any(|l| l.trim() == sidecar) {
         out.push(sidecar);
     }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -161,6 +173,44 @@ mod tests {
     use super::*;
     use crate::runner::prepare;
     use crate::test_support::{LabYaml, Started, TempDir};
+
+    /// The sidecar a machine is started and stopped with is the one Isoloom writes beside it
+    /// (named otherwise before Isoloom 3.0: the machine then lost its routes when started alone).
+    #[test]
+    fn a_machines_routes_sidecar_is_the_one_isoloom_writes() {
+        let dir = TempDir::new("sidecar");
+        let yaml = LabYaml::named("sidecar")
+            .network("a", "10.61.1.0/24")
+            .network("b", "10.61.2.0/24")
+            .reach("a", "b")
+            .machine("pc", &[("a", 10)])
+            .machine("srv", &[("b", 10)])
+            .build();
+        prepare(&dir, &yaml, &[]).unwrap();
+        let compose: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            &std::fs::read_to_string(dir.join(".isoloom/docker/compose.yml")).unwrap(),
+        )
+        .unwrap();
+        let services: Vec<&str> = compose["services"]
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .filter_map(|k| k.as_str())
+            .collect();
+        assert!(
+            services.contains(&routes_sidecar("pc").as_str()),
+            "{services:?}"
+        );
+        assert_eq!(
+            machine_services(&services.join("\n"), "pc"),
+            ["pc".to_string(), routes_sidecar("pc")]
+        );
+        assert_eq!(
+            machine_services("pc\nsrv\n", "pc"),
+            ["pc"],
+            "without routes, no sidecar"
+        );
+    }
 
     /// A machine's console and starting/stopping it alone.
     #[test]
@@ -186,13 +236,14 @@ mod tests {
         assert_eq!(cmd.argv[..3], ["docker", "exec", "-it"]);
         assert_eq!(cmd.argv.last().map(String::as_str), Some(SHELL));
         machine_action(&dir, &spec, "pc", "stop").unwrap();
+        let sidecar = routes_sidecar("pc");
         assert!(
-            !running("pc") && !running("pc-routes"),
+            !running("pc") && !running(&sidecar),
             "the machine and its sidecar stop"
         );
         assert!(running("srv"), "the others keep running");
         machine_action(&dir, &spec, "pc", "start").unwrap();
-        assert!(running("pc") && running("pc-routes"));
+        assert!(running("pc") && running(&sidecar));
         // Its routes came back with the sidecar.
         let routes = run(
             compose(&dir, &["exec", "-T", "pc", "ip", "route"]),

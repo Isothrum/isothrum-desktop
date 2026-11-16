@@ -88,6 +88,8 @@ pub fn up(dir: &Path) -> Result<String, RunError> {
 
 /// Stops the lab: its machines are gone, and its suspended links with them.
 pub fn down(dir: &Path) -> Result<String, RunError> {
+    // The VNC forwarders first: on the lab's networks, they would keep Compose from removing them.
+    super::display::remove_forwarders(dir);
     let out = if runtime(dir) == Runtime::Vagrant {
         super::vagrant::down(dir)?
     } else {
@@ -97,7 +99,6 @@ pub fn down(dir: &Path) -> Result<String, RunError> {
         )?
     };
     super::links::clear_links(dir);
-    super::display::remove_forwarders(dir);
     Ok(out)
 }
 

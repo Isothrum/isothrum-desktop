@@ -181,9 +181,9 @@ fn set_link(
                 return Ok(());
             };
             run(in_container(&id, &script), "Setting the port")?;
-            if up && with_sidecar(dir, machine)?.len() > 1 {
+            if up && let Some(sidecar) = with_sidecar(dir, machine)?.get(1) {
                 run(
-                    compose(dir, &["restart", &format!("{machine}-routes")]),
+                    compose(dir, &["restart", sidecar]),
                     "Setting the routes again",
                 )?;
             }

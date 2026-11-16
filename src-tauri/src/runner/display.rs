@@ -270,6 +270,16 @@ mod tests {
             !banner.is_empty()
         });
         down(&dir).unwrap();
+        let networks = Command::new("docker")
+            .args([
+                "network",
+                "ls",
+                "-q",
+                "--filter",
+                "label=com.docker.compose.project=vnc",
+            ])
+            .output()
+            .unwrap();
         let left = Command::new("docker")
             .args([
                 "ps",
@@ -283,6 +293,10 @@ mod tests {
         assert!(
             left.stdout.is_empty(),
             "the forwarder is removed with the lab"
+        );
+        assert!(
+            networks.stdout.is_empty(),
+            "and the lab's networks with it (the forwarder was on one)"
         );
     }
 }

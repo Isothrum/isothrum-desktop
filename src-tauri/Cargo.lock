@@ -1896,6 +1896,7 @@ dependencies = [
  "isoloom-topology",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "tauri",
  "tauri-build",
  "tauri-plugin-updater",
