@@ -68,6 +68,55 @@ mod tests {
         }
     }
 
+    /// The words between `start` and the next `end` in `text`, split on commas, trimmed and
+    /// unquoted: a list as Rust source writes it.
+    fn listed<'a>(text: &'a str, start: &str, end: &str) -> std::collections::BTreeSet<&'a str> {
+        let from = text.find(start).expect(start) + start.len();
+        let to = from + text[from..].find(end).expect(end);
+        text[from..to]
+            .split(',')
+            .map(|w| w.trim().trim_matches('"'))
+            .filter(|w| !w.is_empty())
+            .collect()
+    }
+
+    /// What the editor can call: the commands the app registers (lib.rs), those it makes
+    /// permissions for (build.rs), and those the editor's capability allows are the same 18. A
+    /// command missing from one is a button that fails in the editor.
+    #[test]
+    fn the_editor_may_call_every_command_the_app_has_and_no_other() {
+        let registered = listed(include_str!("lib.rs"), "generate_handler![", "]");
+        let permitted = listed(include_str!("../build.rs"), "let commands = &[", "]");
+        let allowed: std::collections::BTreeSet<String> = editor()
+            .permissions
+            .iter()
+            .filter_map(|p| p.strip_prefix("allow-"))
+            .map(|p| p.replace('-', "_"))
+            .collect();
+        assert_eq!(registered.len(), 18, "{registered:?}");
+        assert_eq!(registered, permitted);
+        assert_eq!(
+            registered,
+            allowed.iter().map(String::as_str).collect(),
+            "capabilities/editor.json"
+        );
+    }
+
+    /// The updater asks this repository's latest release, and checks it with the app's key.
+    #[test]
+    fn updates_come_signed_from_this_repositorys_releases() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let updater = &conf["plugins"]["updater"];
+        assert_eq!(
+            updater["endpoints"],
+            serde_json::json!([
+                "https://github.com/Isothrum/isothrum-desktop/releases/latest/download/latest.json"
+            ])
+        );
+        assert!(!updater["pubkey"].as_str().unwrap_or_default().is_empty());
+    }
+
     #[test]
     fn the_bundled_editor_runs_only_its_own_scripts() {
         let conf: serde_json::Value =
