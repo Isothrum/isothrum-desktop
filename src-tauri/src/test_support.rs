@@ -1,5 +1,6 @@
 //! What the tests share (compiled for tests only): a folder of their own, the labs they run (and
-//! stop), and waiting for something by polling to a deadline.
+//! stop), waiting for something by polling to a deadline, and stand-ins for the programs a
+//! script runs.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,6 +66,56 @@ pub fn eventually(within: Duration, mut check: impl FnMut() -> bool) -> bool {
             return false;
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Stand-ins for the programs a script runs in a machine (`ip`, `tcpdump`, `nsenter`...): the
+/// script is run by this computer's `sh` with them first on its PATH. Each answers with what the
+/// test gives it, and records the arguments of each call.
+#[cfg(unix)]
+pub struct FakePrograms(TempDir);
+
+#[cfg(unix)]
+impl FakePrograms {
+    pub fn new() -> Self {
+        FakePrograms(TempDir::new("programs"))
+    }
+
+    /// `name` prints `output`, whatever it is asked.
+    pub fn printing(self, name: &str, output: &str) -> Self {
+        std::fs::write(self.0.join(format!("{name}.out")), output).unwrap();
+        self.program(name, &format!("cat \"$(dirname \"$0\")/{name}.out\""))
+    }
+
+    /// `name` runs `body` (sh, its arguments in `$@`).
+    pub fn program(self, name: &str, body: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.0.join(name);
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/{name}.calls\"\n{body}\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        self
+    }
+
+    /// Runs `script` with the stand-ins first on the PATH.
+    pub fn run(&self, script: &str) -> std::process::Output {
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::process::Command::new("sh")
+            .args(["-c", script])
+            .env("PATH", format!("{}:{path}", self.0.display()))
+            .output()
+            .expect("sh runs")
+    }
+
+    /// The arguments of each call to `name`, in order.
+    pub fn calls(&self, name: &str) -> Vec<String> {
+        std::fs::read_to_string(self.0.join(format!("{name}.calls")))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -172,6 +223,16 @@ mod tests {
         }));
         assert_eq!(asked, 3);
         assert!(!eventually(Duration::ZERO, || false));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_stand_in_answers_and_records_its_calls() {
+        let programs = FakePrograms::new().printing("ip", "1: lo\n");
+        let out = programs.run("ip -o link show; ip addr");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "1: lo\n1: lo\n");
+        assert_eq!(programs.calls("ip"), ["-o link show", "addr"]);
+        assert!(programs.calls("tcpdump").is_empty());
     }
 
     #[test]
