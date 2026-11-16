@@ -232,6 +232,7 @@ pub fn environment_live(dir: &Path, spec: &Spec) -> Result<EnvironmentLive, RunE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{LabYaml, Started, TempDir};
 
     const LAB: &str = "version: 1\nname: live\nnetworks:\n  office: { cidr: 10.10.1.0/24 }\n  wire: { cidr: 10.200.0.0/29 }\nmachines:\n  a: { networks: { office: 10, wire: 2 }, app: { image: \"alpine:3.20\" } }\n  b: { networks: { office: 11 }, app: { image: \"alpine:3.20\" } }\n";
 
@@ -334,15 +335,19 @@ mod tests {
         );
     }
 
-    /// Needs Docker (run with `--ignored`): the probe sees a suspended link down, and up again.
+    /// The probe sees a suspended link down, and up again.
     #[test]
-    #[ignore]
+    #[ignore = "needs Docker"]
     fn the_probe_sees_a_suspended_link() {
-        use crate::runner::{down, link_action, prepare, up};
-        let dir = std::env::temp_dir().join(format!("isothrum-live-{}", std::process::id()));
-        let yaml = "version: 1\nname: live\nnetworks:\n  a: { cidr: 10.64.1.0/24 }\nmachines:\n  pc: { networks: { a: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n  srv: { networks: { a: 11 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n";
-        let spec = prepare(&dir, yaml, &[]).unwrap();
-        up(&dir).unwrap();
+        use crate::runner::{link_action, prepare};
+        let dir = TempDir::new("live");
+        let yaml = LabYaml::named("live")
+            .network("a", "10.64.1.0/24")
+            .idle("pc", &[("a", 10)])
+            .idle("srv", &[("a", 11)])
+            .build();
+        let spec = prepare(&dir, &yaml, &[]).unwrap();
+        let _lab = Started::up(&dir);
         let port =
             |l: &EnvironmentLive, m: &str| l.ports.iter().find(|p| p.machine == m).unwrap().clone();
         let live = environment_live(&dir, &spec).unwrap();
@@ -358,7 +363,5 @@ mod tests {
             port(&environment_live(&dir, &spec).unwrap(), "pc").up,
             Some(true)
         );
-        down(&dir).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

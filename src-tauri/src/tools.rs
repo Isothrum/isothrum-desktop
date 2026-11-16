@@ -99,13 +99,11 @@ mod tests {
 
     #[test]
     fn a_program_is_found_with_its_extension() {
-        let dir = std::env::temp_dir().join(format!("isothrum-tools-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::new("tools");
         std::fs::write(dir.join("vagrant.exe"), "").unwrap();
         assert!(found_in(&dir, &candidates("vagrant", &[".exe".into()])));
         assert!(!found_in(&dir, &candidates("vagrant", &[])));
         assert!(!found_in(&dir, &candidates("wireshark", &[".exe".into()])));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

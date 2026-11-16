@@ -212,17 +212,13 @@ mod tests {
             Some(Path::new("/lab/.isoloom/vagrant"))
         );
     }
-}
 
-#[cfg(test)]
-mod vagrant_tests {
-    use crate::runner::{Runtime, prepare, runtime};
-
-    /// Vagrant accepts the Vagrantfile the app prepares for a lab of VMs (needs `vagrant`;
-    /// `ISOTHRUM_VM_LAB` keeps the folder).
+    /// Vagrant accepts the Vagrantfile the app prepares for a lab of VMs (`ISOTHRUM_VM_LAB`
+    /// keeps the folder).
     #[test]
-    #[ignore]
+    #[ignore = "needs Vagrant"]
     fn vagrant_validates_the_prepared_lab() {
+        use crate::runner::{Runtime, prepare, runtime};
         let base = std::env::var("ISOTHRUM_VM_LAB")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir());
@@ -240,14 +236,14 @@ mod vagrant_tests {
             .collect();
         prepare(&dir, yaml, &own).unwrap();
         assert_eq!(runtime(&dir), Runtime::Vagrant);
-        let out = super::vagrant(&dir, &["validate"]).output().unwrap();
+        let out = vagrant(&dir, &["validate"]).output().unwrap();
         assert!(
             out.status.success(),
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        let st = super::status(&dir).unwrap();
+        let st = status(&dir).unwrap();
         assert!(st.contains("\"State\":\"exited\""), "{st}");
     }
 }

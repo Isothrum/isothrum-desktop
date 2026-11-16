@@ -5,8 +5,8 @@ use std::path::Path;
 use isoloom_spec::model::Spec;
 use isoloom_targets::{GeneratedFile, Lab};
 
+use super::lab_files;
 use super::{RUNTIME, RunError, Runtime, compose, lab_of, lines, run, runtime};
-use crate::lab_files;
 use crate::tools::has;
 
 /// The runtime that fits the lab and Isoloom's files for it: Docker when every machine has a
@@ -71,7 +71,7 @@ fn valid_lab(yaml: &str) -> Result<Lab, RunError> {
 /// Starts the lab; the links suspended before it was started again stay cut.
 pub fn up(dir: &Path) -> Result<String, RunError> {
     let mut out = if runtime(dir) == Runtime::Vagrant {
-        crate::vms::up(dir)?
+        super::vagrant::up(dir)?
     } else {
         run(
             compose(dir, &["up", "-d", "--wait", "--remove-orphans"]),
@@ -89,7 +89,7 @@ pub fn up(dir: &Path) -> Result<String, RunError> {
 /// Stops the lab: its machines are gone, and its suspended links with them.
 pub fn down(dir: &Path) -> Result<String, RunError> {
     let out = if runtime(dir) == Runtime::Vagrant {
-        crate::vms::down(dir)?
+        super::vagrant::down(dir)?
     } else {
         run(
             compose(dir, &["down", "--volumes", "--remove-orphans"]),
@@ -104,7 +104,7 @@ pub fn down(dir: &Path) -> Result<String, RunError> {
 /// The lab's services and their state, as `docker compose ps` reports them (one JSON per line).
 pub fn status(dir: &Path) -> Result<String, RunError> {
     if runtime(dir) == Runtime::Vagrant {
-        return crate::vms::status(dir);
+        return super::vagrant::status(dir);
     }
     run(
         compose(dir, &["ps", "--all", "--format", "json"]),
@@ -116,7 +116,7 @@ pub fn status(dir: &Path) -> Result<String, RunError> {
 mod tests {
     use super::*;
     use crate::runner::{lab_spec, prepared};
-    use std::path::PathBuf;
+    use crate::test_support::TempDir;
 
     const CONTAINERS: &str = r#"
 version: 1
@@ -148,21 +148,14 @@ machines:
     app: { steps: [{ run: provision/b.ps1 }] }
 "#;
 
-    fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("isothrum-test-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d
-    }
-
     #[test]
     fn a_lab_of_containers_gets_its_compose_file() {
-        let dir = temp("prepare");
+        let dir = TempDir::new("prepare");
         let spec = prepare(&dir, CONTAINERS, &[]).unwrap();
         assert_eq!(spec.name, "pair");
         let compose = std::fs::read_to_string(dir.join(".isoloom/docker/compose.yml")).unwrap();
         assert!(compose.contains("name: pair"));
         assert!(dir.join("isoloom.yml").is_file());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The lab the editor's compiler writes for a drawing.
@@ -181,14 +174,13 @@ machines:
               "tools":{"kind":{"vm":{"os":"debian@12","provision":["provision/tools.sh"]}},"networks":{"office":null}},
               "user":{"kind":{"container":{"image":"alpine:3.20","idle":true}},"access":true,"networks":{"office":null}}}}"#,
         );
-        let dir = temp("drawn");
+        let dir = TempDir::new("drawn");
         let own = [("provision/tools.sh".to_owned(), "#!/bin/sh\n".to_owned())];
         let spec = prepare(&dir, &yaml, &own).unwrap();
         assert_eq!(runtime(&dir), Runtime::Docker);
         assert!(spec.machines["tools"].docker.is_some());
         assert!(dir.join(".isoloom/docker/build/tools/Dockerfile").is_file());
         assert_eq!(lab_spec(&dir).unwrap().machines.len(), 3);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -232,12 +224,12 @@ machines:
             "    os: debian@12\n",
             "    app: { image: \"alpine:3.20\" }\n",
         );
-        match prepare(&temp("image"), &image, &[]) {
+        match prepare(&TempDir::new("image"), &image, &[]) {
             Err(RunError::Spec(why)) => assert!(why.contains("no target is possible"), "{why}"),
             other => panic!("{other:?}"),
         }
         // Prepared: the runtime is recorded and the Vagrantfile found (when Vagrant is installed).
-        let dir = temp("vm");
+        let dir = TempDir::new("vm");
         match prepare(&dir, WITH_VM, &[]) {
             Ok(_) => {
                 assert_eq!(runtime(&dir), Runtime::Vagrant);
@@ -245,12 +237,11 @@ machines:
             }
             Err(e) => assert!(!has("vagrant") && e.to_string().contains("Vagrant"), "{e}"),
         }
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn the_labs_own_files_stay_inside_it() {
-        let dir = temp("own");
+        let dir = TempDir::new("own");
         prepare(
             &dir,
             CONTAINERS,
@@ -267,13 +258,12 @@ machines:
                 "{bad}"
             );
         }
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn an_invalid_spec_is_refused_with_its_problems() {
         let err = prepare(
-            &temp("bad"),
+            &TempDir::new("bad"),
             "version: 1\nname: x\nnetworks: {}\nmachines: {}\n",
             &[],
         );

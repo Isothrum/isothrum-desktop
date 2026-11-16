@@ -6,16 +6,18 @@
 //! the interface on that network, and streams `tcpdump` to Wireshark (or to a `.pcap` file):
 //! GNS3's "capture on a link", for a lab of containers.
 //!
-//! A lab with VMs runs through Isoloom's Vagrant output, every machine a VM: `vms.rs`. The lab's
+//! A lab with VMs runs through Isoloom's Vagrant output, every machine a VM: `vagrant.rs`. The lab's
 //! folder records which (`runtime`).
 
 mod capture;
 mod display;
+mod lab_files;
 mod lifecycle;
 mod links;
 mod live;
 mod machines;
 mod snapshots;
+mod vagrant;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -105,7 +107,7 @@ pub fn runtime(dir: &Path) -> Runtime {
 pub fn prepared(dir: &Path) -> bool {
     match runtime(dir) {
         Runtime::Docker => dir.join(".isoloom/docker/compose.yml").is_file(),
-        Runtime::Vagrant => crate::vms::dir(dir).join("Vagrantfile").is_file(),
+        Runtime::Vagrant => vagrant::dir(dir).join("Vagrantfile").is_file(),
     }
 }
 
