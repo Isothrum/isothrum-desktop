@@ -190,11 +190,11 @@ fn set_link(
         }
         Runtime::Vagrant => {
             run(
-                crate::vms::ssh_root(dir, machine, &script),
+                super::vagrant::ssh_root(dir, machine, &script),
                 "Setting the port",
             )?;
             if up {
-                crate::vms::restore_routes(dir, machine);
+                super::vagrant::restore_routes(dir, machine);
             }
         }
     }
@@ -246,6 +246,7 @@ pub fn reapply_all_links(dir: &Path, spec: &Spec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{LabYaml, Started, TempDir};
 
     const LAB: &str = "version: 1\nname: links\nnetworks:\n  office: { cidr: 10.10.1.0/24 }\n  wire: { cidr: 10.200.0.0/29 }\nmachines:\n  a: { networks: { office: 10, wire: 2 }, app: { image: \"alpine:3.20\" } }\n  b: { networks: { office: 11 }, app: { image: \"alpine:3.20\" } }\n  r: { networks: { wire: 3 }, app: { image: \"alpine:3.20\" } }\n";
 
@@ -287,14 +288,12 @@ mod tests {
             [link("wire", "a"), link("office", "a"), link("office", "b")]
         );
         assert_eq!(with(&had, &cut, false), [link("wire", "a")]);
-        let dir = std::env::temp_dir().join(format!("isothrum-links-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new("links");
         save(&dir, &had).unwrap();
         assert_eq!(suspended_links(&dir), had);
         save(&dir, &[]).unwrap();
         assert!(!dir.join(LINKS).exists() && suspended_links(&dir).is_empty());
         clear_links(&dir);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A switch's VLAN is `vlan10` in the editor, `sw1.vlan10` in isoloom.yml and `sw1-vlan10`
@@ -318,21 +317,27 @@ mod tests {
     #[test]
     fn a_link_action_is_suspend_or_resume() {
         let spec = crate::runner::spec_for(LAB, crate::runner::Runtime::Docker).unwrap();
-        let dir = std::env::temp_dir().join(format!("isothrum-links-act-{}", std::process::id()));
+        let dir = TempDir::new("links-act");
         let err = link_action(&dir, &spec, "office", None, "cut").unwrap_err();
         assert!(err.to_string().contains("suspend or resume"), "{err}");
     }
 
-    /// Needs Docker (run with `--ignored`): a suspended link carries nothing, and the machine
+    /// A suspended link carries nothing, and the machine
     /// has its routes back once it's resumed; a restarted machine finds its link cut as before.
     #[test]
-    #[ignore]
+    #[ignore = "needs Docker"]
     fn a_suspended_link_carries_nothing_until_resumed() {
-        use crate::runner::{down, machine_action, prepare, up};
-        let dir = std::env::temp_dir().join(format!("isothrum-link-{}", std::process::id()));
-        let yaml = "version: 1\nname: link\nnetworks:\n  a: { cidr: 10.63.1.0/24 }\n  b: { cidr: 10.63.2.0/24 }\nreach: [{ from: a, to: b }]\nmachines:\n  pc: { networks: { a: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n  srv: { networks: { b: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n";
-        let spec = prepare(&dir, yaml, &[]).unwrap();
-        up(&dir).unwrap();
+        use crate::runner::{down, machine_action, prepare};
+        let dir = TempDir::new("link");
+        let yaml = LabYaml::named("link")
+            .network("a", "10.63.1.0/24")
+            .network("b", "10.63.2.0/24")
+            .reach("a", "b")
+            .idle("pc", &[("a", 10)])
+            .idle("srv", &[("b", 10)])
+            .build();
+        let spec = prepare(&dir, &yaml, &[]).unwrap();
+        let _lab = Started::up(&dir);
         let pc = |cmd: &str| {
             run(
                 compose(&dir, &["exec", "-T", "pc", "sh", "-c", cmd]),
@@ -362,6 +367,5 @@ mod tests {
         assert_eq!(suspended_links(&dir).len(), 1);
         down(&dir).unwrap();
         assert!(suspended_links(&dir).is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

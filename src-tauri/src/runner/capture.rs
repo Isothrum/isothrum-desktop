@@ -116,7 +116,7 @@ fn docker_plan(
 /// its container is called `name`, so that stopping the capture can remove it.
 pub fn capture_command(plan: &CapturePlan, name: &str) -> Command {
     if let Some((dir, machine)) = &plan.vm {
-        return crate::vms::capture_command(dir, machine, &capture_script(&plan.prefix));
+        return super::vagrant::capture_command(dir, machine, &capture_script(&plan.prefix));
     }
     let mut c = Command::new("docker");
     c.args([
@@ -251,6 +251,8 @@ fn into_file(mut dump: Command, file: &Path) -> Result<Child, RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{LabYaml, Started, TempDir, eventually};
+    use std::time::Duration;
 
     #[test]
     fn the_capture_finds_the_interface_by_its_network() {
@@ -281,16 +283,20 @@ mod tests {
         );
     }
 
-    /// Needs Docker (run with `--ignored`): a capture on a switch's VLAN, named as the editor
-    /// names it (`vlan10`), records that VLAN's traffic.
+    /// A capture on a switch's VLAN, named as the editor names it (`vlan10`), records that
+    /// VLAN's traffic.
     #[test]
-    #[ignore]
+    #[ignore = "needs Docker"]
     fn a_capture_on_a_vlan_records_its_traffic() {
-        use crate::runner::{down, prepare, up};
-        let dir = std::env::temp_dir().join(format!("isothrum-vcap-{}", std::process::id()));
-        let yaml = "version: 1\nname: vcap\nnetworks:\n  sw1:\n    cidr: 10.65.0.0/19\n    vlans:\n      10: { cidr: 10.65.10.0/24 }\nmachines:\n  pc: { networks: { sw1.vlan10: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n  srv: { networks: { sw1.vlan10: 11 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n";
-        let spec = prepare(&dir, yaml, &[]).unwrap();
-        up(&dir).unwrap();
+        use crate::runner::prepare;
+        let dir = TempDir::new("vcap");
+        let yaml = LabYaml::named("vcap")
+            .switch("sw1", "10.65.0.0/19", &[(10, "10.65.10.0/24")])
+            .idle("pc", &[("sw1.vlan10", 10)])
+            .idle("srv", &[("sw1.vlan10", 11)])
+            .build();
+        let spec = prepare(&dir, &yaml, &[]).unwrap();
+        let _lab = Started::up(&dir);
         let plan = plan_capture(&dir, &spec, "vlan10").unwrap();
         let file = dir.join("vlan10.pcap");
         let name = capture_name();
@@ -299,13 +305,13 @@ mod tests {
             file: Some(file.clone()),
             container: Some(name),
         };
-        // tcpdump writes the pcap header when it starts: after the capture image's download,
-        // the first time.
-        let started = (0..240).any(|_| {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            std::fs::metadata(&file).is_ok_and(|m| m.len() >= 24)
-        });
-        assert!(started, "tcpdump didn't start");
+        let size = || std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        // tcpdump writes the pcap header (24 bytes) when it starts: after the capture image's
+        // download, the first time.
+        assert!(
+            eventually(Duration::from_secs(120), || size() >= 24),
+            "tcpdump didn't start"
+        );
         run(
             compose(
                 &dir,
@@ -314,13 +320,10 @@ mod tests {
             "ping",
         )
         .unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        // Three pings and their replies are well over 300 bytes, once tcpdump has written them.
+        let recorded = eventually(Duration::from_secs(10), || size() > 300);
         capture.stop();
-        // A pcap header is 24 bytes; three pings and their replies are well over 300.
-        let size = std::fs::metadata(&file).unwrap().len();
-        down(&dir).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(size > 300, "the capture has {size} bytes");
+        assert!(recorded, "the capture has {} bytes", size());
     }
 
     #[test]

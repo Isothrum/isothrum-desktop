@@ -35,7 +35,7 @@ pub fn console_command(dir: &Path, spec: &Spec, machine: &str) -> Result<Console
         .get(machine)
         .ok_or_else(|| RunError::Spec(format!("no machine named `{machine}`")))?;
     if runtime(dir) == Runtime::Vagrant {
-        return Ok(crate::vms::console_command(dir, machine));
+        return Ok(super::vagrant::console_command(dir, machine));
     }
     let id = container(dir, machine)?;
     if m.docker.as_ref().is_some_and(|d| d.appliance.is_some()) {
@@ -102,7 +102,7 @@ pub fn machine_action(
         return Err(RunError::Spec(format!("no machine named `{machine}`")));
     }
     let out = if runtime(dir) == Runtime::Vagrant {
-        crate::vms::action(dir, machine, action)?
+        super::vagrant::action(dir, machine, action)?
     } else {
         compose_action(dir, machine, action)?
     };
@@ -159,16 +159,23 @@ pub(super) fn with_sidecar(dir: &Path, machine: &str) -> Result<Vec<String>, Run
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::{down, prepare, up};
+    use crate::runner::prepare;
+    use crate::test_support::{LabYaml, Started, TempDir};
 
-    /// Needs Docker (run with `--ignored`): a machine's console and starting/stopping it alone.
+    /// A machine's console and starting/stopping it alone.
     #[test]
-    #[ignore]
+    #[ignore = "needs Docker"]
     fn one_machine_stops_starts_and_has_a_console() {
-        let dir = std::env::temp_dir().join(format!("isothrum-machine-{}", std::process::id()));
-        let yaml = "version: 1\nname: onem\nnetworks:\n  a: { cidr: 10.61.1.0/24 }\n  b: { cidr: 10.61.2.0/24 }\nreach: [{ from: a, to: b }]\nmachines:\n  pc: { networks: { a: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n  srv: { networks: { b: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n";
-        let spec = prepare(&dir, yaml, &[]).unwrap();
-        up(&dir).unwrap();
+        let dir = TempDir::new("machine");
+        let yaml = LabYaml::named("onem")
+            .network("a", "10.61.1.0/24")
+            .network("b", "10.61.2.0/24")
+            .reach("a", "b")
+            .idle("pc", &[("a", 10)])
+            .idle("srv", &[("b", 10)])
+            .build();
+        let spec = prepare(&dir, &yaml, &[]).unwrap();
+        let _lab = Started::up(&dir);
         let running = |m: &str| {
             !run(compose(&dir, &["ps", "-q", m]), "ps")
                 .unwrap()
@@ -194,7 +201,5 @@ mod tests {
         .unwrap();
         assert!(routes.contains("10.61.2.0/24 via"), "{routes}");
         assert!(machine_action(&dir, &spec, "nobody", "stop").is_err());
-        down(&dir).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

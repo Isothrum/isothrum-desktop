@@ -5,12 +5,12 @@
 mod capabilities;
 mod captures;
 mod console;
-mod lab_files;
 mod lab_name;
 mod runner;
 mod terminal;
+#[cfg(test)]
+mod test_support;
 mod tools;
-mod vms;
 
 use std::path::{Path, PathBuf};
 
