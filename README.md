@@ -101,22 +101,53 @@ Windows. The tests that need Docker or Vagrant run on the maintainers' test mach
 
 ## Release
 
-Push a tag (`git tag v0.2.0 && git push --tags`): `.github/workflows/release.yml` builds the
-installers for Linux, macOS (universal) and Windows on a **draft** release, with `latest.json`
-for the updater. Publish the draft when it looks right.
+Push a tag (`git tag v1.1.0 && git push origin v1.1.0`): `.github/workflows/release.yml` builds
+the installers for Linux, macOS (Apple Silicon and Intel) and Windows on a **draft** release, with
+`latest.json` for the updater, SBOMs, signed checksums and attestations. Publish the draft when it
+looks right. [RELEASE.md](RELEASE.md) says what it signs and the secrets it needs.
 
-Secrets of the repository (Settings → Secrets → Actions):
+## Verify a download
 
-| Secret | What |
+Each release carries, beside the installers:
+
+| File | What it is |
 | --- | --- |
-| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The update key (set). Its public half is in `tauri.conf.json`; keep the private one backed up (it was generated into `~/.isothrum/updater.key`). |
-| `WEBSITE_REPO_TOKEN` | A read-only token for `Isothrum/isothrum-website` while it is private (the editor is built from it). |
-| `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` | The Developer ID Application certificate (.p12, base64), its password, its name. |
-| `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | Notarization: the Apple ID, an app-specific password, the team. |
-| `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` | The code-signing certificate (.pfx, base64) and its password. |
+| `SHA256SUMS` | The SHA-256 of every file of the release |
+| `SHA256SUMS.sigstore.json` | A keyless Sigstore signature of `SHA256SUMS` (a cosign bundle) |
+| `isothrum-desktop-rust.cdx.json`, `isothrum-desktop-npm.cdx.json` | CycloneDX SBOMs of the Rust crates and the npm packages the app is built from |
+| `*.sig`, `latest.json` | The in-app updater's signatures (minisign) and manifest |
 
-Builds are unsigned (for macOS and Windows) until those secrets exist. The updater downloads
-from GitHub releases: it works once the repository is public.
+GitHub also keeps, for every file, a build provenance attestation (built by this repository's
+release workflow from a given commit) and, for every installer, an attestation of each SBOM. The
+checks need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) (step 1) and
+the [GitHub CLI](https://cli.github.com/) (steps 3 and 4).
+
+```sh
+VERSION=X.Y.Z
+BASE="https://github.com/Isothrum/isothrum-desktop/releases/download/v${VERSION}"
+curl -fsSLO "${BASE}/SHA256SUMS"
+curl -fsSLO "${BASE}/SHA256SUMS.sigstore.json"
+
+# 1. The checksums are the release workflow's, for that tag ("Verified OK").
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/Isothrum/isothrum-desktop/.github/workflows/release.yml@refs/tags/v${VERSION}" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# 2. Your download is in them (macOS: shasum -a 256 --ignore-missing -c SHA256SUMS).
+sha256sum --ignore-missing -c SHA256SUMS
+
+# 3. It was built by the release workflow.
+gh attestation verify <installer> --repo Isothrum/isothrum-desktop \
+  --signer-workflow Isothrum/isothrum-desktop/.github/workflows/release.yml
+
+# 4. What it is built from: the SBOMs attested of it.
+gh attestation verify <installer> --repo Isothrum/isothrum-desktop --predicate-type https://cyclonedx.org/bom
+```
+
+On Windows, compare `(Get-FileHash .\<installer>).Hash.ToLower()` with the installer's line in
+`SHA256SUMS`, and check the installer's signature with `Get-AuthenticodeSignature`. On macOS,
+`spctl -a -vvv /Applications/Isothrum.app` checks the app's Developer ID signature and
+notarization.
 
 A local *production* build of the website served over http needs `LOCAL_HTTP=1` at build time:
 WebKit doesn't exempt localhost from `upgrade-insecure-requests`.
