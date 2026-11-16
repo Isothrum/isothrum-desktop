@@ -60,11 +60,10 @@ mod tests {
 
     #[test]
     fn a_file_the_lab_no_longer_has_goes_away() {
-        let dir = std::env::temp_dir().join(format!("isothrum-files-{}", std::process::id()));
+        let dir = crate::test_support::TempDir::new("files");
         write_all(&dir, &[("a/one.sh", "1"), ("two.sh", "2")]).unwrap();
         write_all(&dir, &[("two.sh", "2b")]).unwrap();
         assert!(!dir.join("a/one.sh").exists());
         assert_eq!(std::fs::read_to_string(dir.join("two.sh")).unwrap(), "2b");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

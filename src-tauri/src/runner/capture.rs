@@ -20,6 +20,13 @@ pub fn prefix_of(cidr: &str) -> Option<String> {
     Some(format!("{head}."))
 }
 
+/// The prefix of an IPv4 block, checked to be digits and dots only (it goes into a script).
+pub fn ipv4_prefix(cidr: &str) -> Result<String, RunError> {
+    prefix_of(cidr)
+        .filter(|p| p.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .ok_or_else(|| RunError::NotIpv4(cidr.into()))
+}
+
 /// The shell that finds the interface whose address starts with `prefix`, in `$IF` (a VLAN's
 /// `eth1.10@eth1` without its parent), or fails. The prefix is checked by the caller to be
 /// digits and dots only, so it can't break out of the quotes.
@@ -44,9 +51,8 @@ pub fn capture_script(prefix: &str) -> String {
 pub struct CapturePlan {
     pub container: String,
     pub prefix: String,
-    /// In a lab with VMs: the lab's folder, its runtime, the machine, and whether it's a
-    /// container in the Docker host VM.
-    pub vm: Option<(PathBuf, Runtime, String, bool)>,
+    /// In a lab with VMs: the lab's folder and the machine.
+    pub vm: Option<(PathBuf, String)>,
 }
 
 /// Picks the machine to capture from: on `network`, the first one Isoloom attached to it.
@@ -56,13 +62,11 @@ pub fn plan_capture(dir: &Path, spec: &Spec, network: &str) -> Result<CapturePla
     let net = spec
         .networks
         .get(network)
-        .ok_or_else(|| RunError::Spec(format!("the lab has no network `{network}`")))?;
-    let prefix = prefix_of(&net.cidr)
-        .filter(|p| p.chars().all(|c| c.is_ascii_digit() || c == '.'))
-        .ok_or_else(|| RunError::Spec(format!("`{}` isn't an IPv4 block", net.cidr)))?;
+        .ok_or_else(|| RunError::NoNetwork(network.clone()))?;
+    let prefix = ipv4_prefix(&net.cidr)?;
     match runtime(dir) {
         Runtime::Docker => docker_plan(dir, spec, network, prefix),
-        rt => vm_plan(dir, spec, rt, network, prefix),
+        Runtime::Vagrant => vm_plan(dir, spec, network, prefix),
     }
 }
 
@@ -70,7 +74,6 @@ pub fn plan_capture(dir: &Path, spec: &Spec, network: &str) -> Result<CapturePla
 fn vm_plan(
     dir: &Path,
     spec: &Spec,
-    rt: Runtime,
     network: &str,
     prefix: String,
 ) -> Result<CapturePlan, RunError> {
@@ -79,12 +82,14 @@ fn vm_plan(
         .iter()
         .find(|(_, m)| m.networks.contains_key(network))
         .map(|(name, _)| name.clone())
-        .ok_or_else(|| RunError::Spec(format!("no machine is on `{network}`")))?;
-    let in_host = crate::vms::in_host(spec, rt, &machine);
+        .ok_or_else(|| RunError::NobodyOn {
+            network: network.into(),
+            containers: false,
+        })?;
     Ok(CapturePlan {
         container: String::new(),
         prefix,
-        vm: Some((dir.to_path_buf(), rt, machine, in_host)),
+        vm: Some((dir.to_path_buf(), machine)),
     })
 }
 
@@ -100,13 +105,14 @@ fn docker_plan(
         .iter()
         .find(|(_, m)| m.networks.contains_key(network) && m.docker.is_some())
         .map(|(name, _)| name.clone())
-        .ok_or_else(|| RunError::Spec(format!("no container is on `{network}`")))?;
+        .ok_or_else(|| RunError::NobodyOn {
+            network: network.into(),
+            containers: true,
+        })?;
     let id = run(compose(dir, &["ps", "-q", &machine]), "Finding the machine")?;
     let container = id.lines().next().unwrap_or("").trim().to_string();
     if container.is_empty() {
-        return Err(RunError::Spec(format!(
-            "`{machine}` isn't running: start the lab first"
-        )));
+        return Err(RunError::NotRunning(machine));
     }
     Ok(CapturePlan {
         container,
@@ -118,14 +124,8 @@ fn docker_plan(
 /// The capture process: tcpdump in the machine's network namespace, pcap on stdout. On Docker,
 /// its container is called `name`, so that stopping the capture can remove it.
 pub fn capture_command(plan: &CapturePlan, name: &str) -> Command {
-    if let Some((dir, rt, machine, in_host)) = &plan.vm {
-        return crate::vms::capture_command(
-            dir,
-            *rt,
-            machine,
-            *in_host,
-            &capture_script(&plan.prefix),
-        );
+    if let Some((dir, machine)) = &plan.vm {
+        return super::vagrant::capture_command(dir, machine, &capture_script(&plan.prefix));
     }
     let mut c = Command::new("docker");
     c.args([
@@ -260,14 +260,60 @@ fn into_file(mut dump: Command, file: &Path) -> Result<Child, RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::test_support::FakePrograms;
+    use crate::test_support::{LabYaml, Started, TempDir, eventually};
+    use std::time::Duration;
+
+    /// What `ip -o -4 addr show` prints in a machine on a LAN, a cable and a switch's VLAN.
+    #[cfg(unix)]
+    const ADDRESSES: &str = "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever
+11: eth0    inet 10.10.10.5/24 brd 10.10.10.255 scope global eth0\\       valid_lft forever
+12: eth1    inet 10.10.1.10/24 brd 10.10.1.255 scope global eth1\\       valid_lft forever
+13: eth2.10@eth2    inet 10.65.10.10/24 brd 10.65.10.255 scope global eth2.10\\       valid_lft forever
+";
 
     #[test]
-    fn the_capture_finds_the_interface_by_its_network() {
+    #[cfg(unix)]
+    fn the_capture_streams_the_interface_on_its_network() {
+        // `10.10.1.` is eth1's, not eth0's 10.10.10.5; a VLAN's interface goes without its parent.
+        for (prefix, interface) in [("10.10.1.", "eth1"), ("10.65.10.", "eth2.10")] {
+            let programs = FakePrograms::new()
+                .printing("ip", ADDRESSES)
+                .printing("tcpdump", "");
+            let out = programs.run(&capture_script(prefix));
+            assert!(out.status.success(), "{prefix}: {out:?}");
+            assert_eq!(
+                programs.calls("tcpdump"),
+                [format!("-i {interface} -U -w -")],
+                "{prefix}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn no_capture_starts_without_an_interface_on_the_network() {
+        let programs = FakePrograms::new()
+            .printing("ip", ADDRESSES)
+            .printing("tcpdump", "");
+        let out = programs.run(&capture_script("10.99.0."));
+        assert!(!out.status.success());
+        assert!(programs.calls("tcpdump").is_empty());
+    }
+
+    #[test]
+    fn a_networks_prefix_is_its_blocks_first_three_octets() {
         assert_eq!(prefix_of("10.10.1.0/24").as_deref(), Some("10.10.1."));
         assert_eq!(prefix_of("10.200.0.8/29").as_deref(), Some("10.200.0."));
-        let script = capture_script("10.10.1.");
-        assert!(script.contains("p='10.10.1.'"));
-        assert!(script.contains("exec tcpdump -i \"$IF\" -U -w -"));
+        // What goes into a script is digits and dots only.
+        for cidr in ["fd00::/64", "10.10.1'x.0/24"] {
+            assert_eq!(
+                ipv4_prefix(cidr),
+                Err(RunError::NotIpv4(cidr.into())),
+                "{cidr}"
+            );
+        }
     }
 
     #[test]
@@ -290,16 +336,20 @@ mod tests {
         );
     }
 
-    /// Needs Docker (run with `--ignored`): a capture on a switch's VLAN, named as the editor
-    /// names it (`vlan10`), records that VLAN's traffic.
+    /// A capture on a switch's VLAN, named as the editor names it (`vlan10`), records that
+    /// VLAN's traffic.
     #[test]
-    #[ignore]
+    #[ignore = "needs Docker"]
     fn a_capture_on_a_vlan_records_its_traffic() {
-        use crate::runner::{down, prepare, up};
-        let dir = std::env::temp_dir().join(format!("isothrum-vcap-{}", std::process::id()));
-        let yaml = "version: 1\nname: vcap\nnetworks:\n  sw1:\n    cidr: 10.65.0.0/19\n    vlans:\n      10: { cidr: 10.65.10.0/24 }\nmachines:\n  pc: { networks: { sw1.vlan10: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n  srv: { networks: { sw1.vlan10: 11 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n";
-        let spec = prepare(&dir, yaml, &[]).unwrap();
-        up(&dir).unwrap();
+        use crate::runner::prepare;
+        let dir = TempDir::new("vcap");
+        let yaml = LabYaml::named("vcap")
+            .switch("sw1", "10.65.0.0/19", &[(10, "10.65.10.0/24")])
+            .idle("pc", &[("sw1.vlan10", 10)])
+            .idle("srv", &[("sw1.vlan10", 11)])
+            .build();
+        let spec = prepare(&dir, &yaml, &[]).unwrap();
+        let _lab = Started::up(&dir);
         let plan = plan_capture(&dir, &spec, "vlan10").unwrap();
         let file = dir.join("vlan10.pcap");
         let name = capture_name();
@@ -308,13 +358,13 @@ mod tests {
             file: Some(file.clone()),
             container: Some(name),
         };
-        // tcpdump writes the pcap header when it starts: after the capture image's download,
-        // the first time.
-        let started = (0..240).any(|_| {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            std::fs::metadata(&file).is_ok_and(|m| m.len() >= 24)
-        });
-        assert!(started, "tcpdump didn't start");
+        let size = || std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        // tcpdump writes the pcap header (24 bytes) when it starts: after the capture image's
+        // download, the first time.
+        assert!(
+            eventually(Duration::from_secs(120), || size() >= 24),
+            "tcpdump didn't start"
+        );
         run(
             compose(
                 &dir,
@@ -323,13 +373,10 @@ mod tests {
             "ping",
         )
         .unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        // Three pings and their replies are well over 300 bytes, once tcpdump has written them.
+        let recorded = eventually(Duration::from_secs(10), || size() > 300);
         capture.stop();
-        // A pcap header is 24 bytes; three pings and their replies are well over 300.
-        let size = std::fs::metadata(&file).unwrap().len();
-        down(&dir).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(size > 300, "the capture has {size} bytes");
+        assert!(recorded, "the capture has {} bytes", size());
     }
 
     #[test]

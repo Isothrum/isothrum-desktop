@@ -6,16 +6,18 @@
 //! the interface on that network, and streams `tcpdump` to Wireshark (or to a `.pcap` file):
 //! GNS3's "capture on a link", for a lab of containers.
 //!
-//! A lab with VMs runs through Isoloom's Vagrant output, or its hybrid one when it mixes VMs and
-//! containers: `vms.rs`. The lab's folder records which (`runtime`).
+//! A lab with VMs runs through Isoloom's Vagrant output, every machine a VM: `vagrant.rs`. The lab's
+//! folder records which (`runtime`).
 
 mod capture;
 mod display;
+mod lab_files;
 mod lifecycle;
 mod links;
 mod live;
 mod machines;
 mod snapshots;
+mod vagrant;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,15 +30,61 @@ pub use display::open_display;
 pub use lifecycle::{down, prepare, status, up};
 pub use links::{Link, editor_links, link_action, suspended_links};
 pub use live::{EnvironmentLive, environment_live};
-pub use machines::{SHELL, console_command, container, machine_action};
+pub use machines::{console_command, container, machine_action, unknown_machine_action};
 pub use snapshots::{Snapshot, delete_snapshot, snapshots, take_snapshot, use_snapshot};
 
-#[derive(Debug)]
+/// Why a command couldn't do what the editor asked. The editor shows its text; the tests match
+/// its variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunError {
-    /// The YAML isn't an Isoloom spec.
+    /// The YAML isn't an Isoloom spec, or Isoloom finds problems in it (in its words).
     Spec(String),
-    /// The spec can run, but not as containers on this machine (it has VMs, for example).
-    NotDocker(String),
+    /// What the editor sent as a lab's name isn't one (it becomes a folder's name).
+    LabName(String),
+    /// One of the lab's own files would be written outside its folder.
+    NotInsideLab(String),
+    /// No local target runs the lab: neither Docker (a machine has no container form) nor
+    /// Vagrant (a machine has no VM form).
+    NoLocalTarget,
+    /// The lab has VMs, and Vagrant isn't installed.
+    VagrantMissing,
+    /// The lab's folder has no isoloom.yml: it was never started.
+    NotStarted,
+    NoMachine(String),
+    NoNetwork(String),
+    /// A network's block isn't IPv4 (its interface can't be found by address).
+    NotIpv4(String),
+    NotOnNetwork {
+        machine: String,
+        network: String,
+    },
+    /// No machine (or, `containers`, no container) is on the network.
+    NobodyOn {
+        network: String,
+        containers: bool,
+    },
+    /// The machine has no running container (or VM).
+    NotRunning(String),
+    /// A network appliance without an address on Isoloom's management network.
+    NoManagementAddress(String),
+    /// The machine shows no screen: no VNC server in its image, no network, or a VM whose
+    /// provider shows none from here.
+    NoScreen {
+        machine: String,
+        why: NoScreen,
+    },
+    UnknownAction {
+        action: String,
+        /// The actions there are, as the message lists them.
+        expected: &'static str,
+    },
+    NoSnapshot {
+        id: String,
+        /// The machine it was asked for, when one was.
+        machine: Option<String>,
+    },
+    /// The machine runs from this snapshot: it can't be deleted.
+    SnapshotInUse(String),
     Io(String),
     /// A command failed; its output says why.
     Command {
@@ -45,26 +93,99 @@ pub enum RunError {
     },
 }
 
+/// Why a machine shows no screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoScreen {
+    /// A container whose image runs no VNC server.
+    NoVncServer,
+    /// A container on no network.
+    NoNetwork,
+    /// A VM whose provider gives no display address.
+    NoDisplay,
+    /// A VM that isn't running, or whose provider shows nothing from here.
+    NotShown,
+}
+
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunError::Spec(e) => write!(f, "{e}"),
-            RunError::NotDocker(why) => write!(f, "{why}"),
-            RunError::Io(e) => write!(f, "{e}"),
+            RunError::Spec(e) | RunError::Io(e) => write!(f, "{e}"),
+            RunError::LabName(name) => write!(
+                f,
+                "`{name}` isn't a lab name (lowercase letters, digits and dashes)"
+            ),
+            RunError::NotInsideLab(path) => write!(f, "`{path}` isn't a path inside the lab"),
+            RunError::NoLocalTarget => write!(
+                f,
+                "This lab runs neither as containers nor as local VMs: export it and run it with \
+                 `isoloom run` on a target that fits it."
+            ),
+            RunError::VagrantMissing => write!(
+                f,
+                "This lab has VMs: they run with Vagrant (and VirtualBox or libvirt), which isn't \
+                 installed. Install it from vagrantup.com, or export the lab."
+            ),
+            RunError::NotStarted => write!(f, "start the lab first"),
+            RunError::NoMachine(m) => write!(f, "no machine named `{m}`"),
+            RunError::NoNetwork(n) => write!(f, "the lab has no network `{n}`"),
+            RunError::NotIpv4(cidr) => write!(f, "`{cidr}` isn't an IPv4 block"),
+            RunError::NotOnNetwork { machine, network } => {
+                write!(f, "`{machine}` isn't on `{network}`")
+            }
+            RunError::NobodyOn {
+                network,
+                containers,
+            } => {
+                let who = if *containers { "container" } else { "machine" };
+                write!(f, "no {who} is on `{network}`")
+            }
+            RunError::NotRunning(m) => write!(f, "`{m}` isn't running: start the lab first"),
+            RunError::NoManagementAddress(m) => write!(f, "`{m}` has no management address"),
+            RunError::NoScreen { machine, why } => match why {
+                NoScreen::NoVncServer => write!(
+                    f,
+                    "`{machine}` has no screen: its image runs no VNC server (none of its ports \
+                     is in 5900–5999). Open its console instead."
+                ),
+                NoScreen::NoNetwork => write!(f, "`{machine}` is on no network"),
+                NoScreen::NoDisplay => write!(f, "`{machine}` has no display"),
+                NoScreen::NotShown => write!(
+                    f,
+                    "`{machine}` isn't running, or its provider shows no screen from here \
+                     (VirtualBox and libvirt do): open its console instead"
+                ),
+            },
+            RunError::UnknownAction { action, expected } => {
+                write!(f, "unknown action `{action}`: {expected}")
+            }
+            RunError::NoSnapshot { id, machine } => match machine {
+                Some(m) => write!(f, "no snapshot `{id}` of `{m}`"),
+                None => write!(f, "no snapshot `{id}`"),
+            },
+            RunError::SnapshotInUse(m) => write!(
+                f,
+                "`{m}` runs from this snapshot: bring it back to its own image first"
+            ),
             RunError::Command { what, output } => write!(f, "{what} failed:\n{output}"),
         }
     }
 }
 
+/// The editor gets a command's error as its text.
+impl From<RunError> for String {
+    fn from(e: RunError) -> String {
+        e.to_string()
+    }
+}
+
 impl std::error::Error for RunError {}
 
-/// How a lab runs: Docker Compose, or Vagrant (only VMs, or VMs and a Docker host VM for the
-/// containers).
+/// How a lab runs: Docker Compose, or Vagrant (every machine a VM, a container machine in its VM
+/// form).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Runtime {
     Docker,
     Vagrant,
-    Hybrid,
 }
 
 impl Runtime {
@@ -73,7 +194,6 @@ impl Runtime {
         match self {
             Runtime::Docker => Target::Docker,
             Runtime::Vagrant => Target::Vagrant,
-            Runtime::Hybrid => Target::Hybrid,
         }
     }
 
@@ -82,7 +202,6 @@ impl Runtime {
         match self {
             Runtime::Docker => "docker",
             Runtime::Vagrant => "vagrant",
-            Runtime::Hybrid => "hybrid",
         }
     }
 }
@@ -96,8 +215,10 @@ pub fn runtime(dir: &Path) -> Runtime {
         .unwrap_or_default()
         .trim()
     {
-        "vagrant" => Runtime::Vagrant,
-        "hybrid" => Runtime::Hybrid,
+        // "hybrid": a folder an earlier version prepared (Isoloom's hybrid output, gone in 3.0).
+        // Its files aren't Vagrant's own folder's, so it reads as not prepared: started again,
+        // it is prepared anew.
+        "vagrant" | "hybrid" => Runtime::Vagrant,
         _ => Runtime::Docker,
     }
 }
@@ -106,7 +227,7 @@ pub fn runtime(dir: &Path) -> Runtime {
 pub fn prepared(dir: &Path) -> bool {
     match runtime(dir) {
         Runtime::Docker => dir.join(".isoloom/docker/compose.yml").is_file(),
-        rt => crate::vms::dir(dir, rt).join("Vagrantfile").is_file(),
+        Runtime::Vagrant => vagrant::dir(dir).join("Vagrantfile").is_file(),
     }
 }
 
@@ -169,7 +290,7 @@ pub fn spec_network(spec: &Spec, name: &str) -> Result<String, RunError> {
                 .is_some_and(|(l, i)| Some(*i) == id && lan.is_none_or(|lan| lan == l))
         })
         .map(|(flat, _)| flat.clone())
-        .ok_or_else(|| RunError::Spec(format!("the lab has no network `{name}`")))
+        .ok_or_else(|| RunError::NoNetwork(name.into()))
 }
 
 /// The editor's name for one of the spec's networks: `vlan10` for a VLAN's, else its own.
@@ -199,7 +320,7 @@ pub fn spec_for(yaml: &str, runtime: Runtime) -> Result<Spec, RunError> {
 
 /// The lab's spec as last started (its folder's isoloom.yml), as its runtime runs it.
 pub fn lab_spec(dir: &Path) -> Result<Spec, RunError> {
-    let yaml = std::fs::read_to_string(dir.join("isoloom.yml"))
-        .map_err(|_| RunError::Spec("start the lab first".into()))?;
+    let yaml =
+        std::fs::read_to_string(dir.join("isoloom.yml")).map_err(|_| RunError::NotStarted)?;
     spec_for(&yaml, runtime(dir))
 }

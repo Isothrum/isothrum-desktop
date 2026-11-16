@@ -15,7 +15,7 @@ use std::process::Command;
 
 use isoloom_spec::model::Spec;
 
-use super::{CAPTURE_IMAGE, RunError, Runtime, container, run, runtime};
+use super::{CAPTURE_IMAGE, NoScreen, RunError, Runtime, container, run, runtime};
 
 /// The label that marks a lab's VNC forwarders (its value: the lab's folder name).
 const LABEL: &str = "isothrum.vnc";
@@ -23,14 +23,11 @@ const LABEL: &str = "isothrum.vnc";
 /// Opens `machine`'s screen; returns what was opened (a `vnc://` address, or the VM's window).
 pub fn open_display(dir: &Path, spec: &Spec, machine: &str) -> Result<String, RunError> {
     if !spec.machines.contains_key(machine) {
-        return Err(RunError::Spec(format!("no machine named `{machine}`")));
+        return Err(RunError::NoMachine(machine.into()));
     }
     match runtime(dir) {
         Runtime::Docker => container_display(dir, machine),
-        rt if crate::vms::in_host(spec, rt, machine) => Err(RunError::Spec(format!(
-            "`{machine}` is a container in a lab with VMs: open its console instead"
-        ))),
-        rt => vm_display(dir, rt, machine),
+        Runtime::Vagrant => vm_display(dir, machine),
     }
 }
 
@@ -129,24 +126,23 @@ fn container_display(dir: &Path, machine: &str) -> Result<String, RunError> {
     let id = container(dir, machine)?;
     let mut c = Command::new("docker");
     c.args(["inspect", "-f", "{{json .Config.ExposedPorts}}", &id]);
-    let port = vnc_port(&run(c, "Reading its ports")?).ok_or_else(|| {
-        RunError::Spec(format!(
-            "`{machine}` has no screen: its image runs no VNC server (none of its ports is in \
-             5900–5999). Open its console instead."
-        ))
-    })?;
+    let no_screen = |why| RunError::NoScreen {
+        machine: machine.into(),
+        why,
+    };
+    let port = vnc_port(&run(c, "Reading its ports")?).ok_or(no_screen(NoScreen::NoVncServer))?;
     let (network, ip) = networks(&id)?
         .into_iter()
         .next()
-        .ok_or_else(|| RunError::Spec(format!("`{machine}` is on no network")))?;
+        .ok_or(no_screen(NoScreen::NoNetwork))?;
     let url = format!("vnc://{}", forward(dir, machine, &network, &ip, port)?);
     crate::terminal::open_url(&url)?;
     Ok(url)
 }
 
 /// A VM's screen: VirtualBox's window, or libvirt's VNC/SPICE display.
-fn vm_display(dir: &Path, rt: Runtime, machine: &str) -> Result<String, RunError> {
-    let state = crate::vms::dir(dir, rt)
+fn vm_display(dir: &Path, machine: &str) -> Result<String, RunError> {
+    let state = super::vagrant::dir(dir)
         .join(".vagrant/machines")
         .join(machine);
     let id = |provider: &str| {
@@ -166,15 +162,18 @@ fn vm_display(dir: &Path, rt: Runtime, machine: &str) -> Result<String, RunError
         c.args(["-c", "qemu:///system", "domdisplay", &id]);
         let url = run(c, "Finding the VM's display")?.trim().to_string();
         if url.is_empty() {
-            return Err(RunError::Spec(format!("`{machine}` has no display")));
+            return Err(RunError::NoScreen {
+                machine: machine.into(),
+                why: NoScreen::NoDisplay,
+            });
         }
         crate::terminal::open_url(&url)?;
         return Ok(url);
     }
-    Err(RunError::Spec(format!(
-        "`{machine}` isn't running, or its provider shows no screen from here (VirtualBox and \
-         libvirt do): open its console instead"
-    )))
+    Err(RunError::NoScreen {
+        machine: machine.into(),
+        why: NoScreen::NotShown,
+    })
 }
 
 /// Removes the lab's VNC forwarders (the lab is stopping).
@@ -201,6 +200,8 @@ pub fn remove_forwarders(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{LabYaml, Started, TempDir, eventually};
+    use std::time::Duration;
 
     #[test]
     fn the_vnc_port_is_the_first_in_5900_5999() {
@@ -226,17 +227,20 @@ mod tests {
         assert_eq!(published(""), None);
     }
 
-    /// Needs Docker (run with `--ignored`): the forwarder reaches a machine's port 5900 from
-    /// 127.0.0.1, and stopping the lab removes it.
+    /// The forwarder reaches a machine's port 5900 from 127.0.0.1, and stopping the lab
+    /// removes it.
     #[test]
-    #[ignore]
+    #[ignore = "needs Docker"]
     fn a_machines_vnc_port_is_reachable_from_this_computer() {
-        use crate::runner::{compose, down, prepare, up};
+        use crate::runner::{compose, down, prepare};
         use std::io::Read;
-        let dir = std::env::temp_dir().join(format!("isothrum-vnc-{}", std::process::id()));
-        let yaml = "version: 1\nname: vnc\nnetworks:\n  a: { cidr: 10.66.1.0/24 }\nmachines:\n  desk: { networks: { a: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n";
-        prepare(&dir, yaml, &[]).unwrap();
-        up(&dir).unwrap();
+        let dir = TempDir::new("vnc");
+        let yaml = LabYaml::named("vnc")
+            .network("a", "10.66.1.0/24")
+            .idle("desk", &[("a", 10)])
+            .build();
+        prepare(&dir, &yaml, &[]).unwrap();
+        let _lab = Started::up(&dir);
         // A stand-in VNC server: it greets with the RFB banner, as one does.
         run(
             compose(
@@ -257,19 +261,27 @@ mod tests {
         let (network, ip) = networks(&id).unwrap().remove(0);
         assert_eq!(ip, "10.66.1.10", "the lab's network comes first");
         let at = forward(&dir, "desk", &network, &ip, 5900).unwrap();
+        // The forwarder takes a moment to listen, and the stand-in a moment to answer again.
         let mut banner = String::new();
-        for _ in 0..30 {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if let Ok(mut s) = std::net::TcpStream::connect(&at) {
-                s.set_read_timeout(Some(std::time::Duration::from_secs(3)))
-                    .unwrap();
-                let _ = s.read_to_string(&mut banner);
-                if !banner.is_empty() {
-                    break;
-                }
-            }
-        }
+        eventually(Duration::from_secs(15), || {
+            let Ok(mut s) = std::net::TcpStream::connect(&at) else {
+                return false;
+            };
+            let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+            let _ = s.read_to_string(&mut banner);
+            !banner.is_empty()
+        });
         down(&dir).unwrap();
+        let networks = Command::new("docker")
+            .args([
+                "network",
+                "ls",
+                "-q",
+                "--filter",
+                "label=com.docker.compose.project=vnc",
+            ])
+            .output()
+            .unwrap();
         let left = Command::new("docker")
             .args([
                 "ps",
@@ -279,11 +291,14 @@ mod tests {
             ])
             .output()
             .unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(banner.starts_with("RFB 003.008"), "{banner:?} from {at}");
         assert!(
             left.stdout.is_empty(),
             "the forwarder is removed with the lab"
+        );
+        assert!(
+            networks.stdout.is_empty(),
+            "and the lab's networks with it (the forwarder was on one)"
         );
     }
 }

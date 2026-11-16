@@ -9,7 +9,7 @@ use std::process::Command;
 
 use isoloom_spec::model::Spec;
 
-use super::capture::{CAPTURE_IMAGE, interface_script, prefix_of};
+use super::capture::{CAPTURE_IMAGE, interface_script, ipv4_prefix};
 use super::machines::{running_container, with_sidecar};
 use super::{RunError, Runtime, compose, run, runtime};
 
@@ -82,10 +82,8 @@ fn ports(
     let net = spec
         .networks
         .get(network)
-        .ok_or_else(|| RunError::Spec(format!("the lab has no network `{network}`")))?;
-    let prefix = prefix_of(&net.cidr)
-        .filter(|p| p.chars().all(|c| c.is_ascii_digit() || c == '.'))
-        .ok_or_else(|| RunError::Spec(format!("`{}` isn't an IPv4 block", net.cidr)))?;
+        .ok_or_else(|| RunError::NoNetwork(network.into()))?;
+    let prefix = ipv4_prefix(&net.cidr)?;
     let on_network = |m: &str| {
         spec.machines
             .get(m)
@@ -94,7 +92,10 @@ fn ports(
     let names: Vec<String> = match machines {
         Some(named) => {
             if let Some(m) = named.iter().find(|m| !on_network(m)) {
-                return Err(RunError::Spec(format!("`{m}` isn't on `{network}`")));
+                return Err(RunError::NotOnNetwork {
+                    machine: m.clone(),
+                    network: network.into(),
+                });
             }
             named.to_vec()
         }
@@ -106,7 +107,10 @@ fn ports(
             .collect(),
     };
     if names.is_empty() {
-        return Err(RunError::Spec(format!("no machine is on `{network}`")));
+        return Err(RunError::NobodyOn {
+            network: network.into(),
+            containers: false,
+        });
     }
     Ok((prefix, names))
 }
@@ -126,9 +130,10 @@ pub fn link_action(
         "suspend" => true,
         "resume" => false,
         other => {
-            return Err(RunError::Spec(format!(
-                "unknown action `{other}`: suspend or resume"
-            )));
+            return Err(RunError::UnknownAction {
+                action: other.into(),
+                expected: "suspend or resume",
+            });
         }
     };
     // Recorded by the spec's name (what the machines are on); reported by the editor's.
@@ -181,21 +186,20 @@ fn set_link(
                 return Ok(());
             };
             run(in_container(&id, &script), "Setting the port")?;
-            if up && with_sidecar(dir, machine)?.len() > 1 {
+            if up && let Some(sidecar) = with_sidecar(dir, machine)?.get(1) {
                 run(
-                    compose(dir, &["restart", &format!("{machine}-routes")]),
+                    compose(dir, &["restart", sidecar]),
                     "Setting the routes again",
                 )?;
             }
         }
-        rt => {
-            let in_host = crate::vms::in_host(spec, rt, machine);
+        Runtime::Vagrant => {
             run(
-                crate::vms::in_namespace(dir, rt, machine, in_host, &script),
+                super::vagrant::ssh_root(dir, machine, &script),
                 "Setting the port",
             )?;
             if up {
-                crate::vms::restore_routes(dir, rt, machine, in_host);
+                super::vagrant::restore_routes(dir, machine);
             }
         }
     }
@@ -247,6 +251,7 @@ pub fn reapply_all_links(dir: &Path, spec: &Spec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{LabYaml, Started, TempDir};
 
     const LAB: &str = "version: 1\nname: links\nnetworks:\n  office: { cidr: 10.10.1.0/24 }\n  wire: { cidr: 10.200.0.0/29 }\nmachines:\n  a: { networks: { office: 10, wire: 2 }, app: { image: \"alpine:3.20\" } }\n  b: { networks: { office: 11 }, app: { image: \"alpine:3.20\" } }\n  r: { networks: { wire: 3 }, app: { image: \"alpine:3.20\" } }\n";
 
@@ -258,11 +263,28 @@ mod tests {
     }
 
     #[test]
-    fn the_script_sets_the_port_on_the_block() {
-        let down = link_script("10.10.1.", false);
-        assert!(down.contains("index($4, p) == 1") && down.contains("p='10.10.1.'"));
-        assert!(down.ends_with("ip link set \"$IF\" down"), "{down}");
-        assert!(link_script("10.10.1.", true).ends_with("ip link set \"$IF\" up"));
+    #[cfg(unix)]
+    fn the_script_sets_the_port_on_the_block_down_or_up() {
+        let addresses = "11: eth0    inet 10.10.10.5/24 scope global eth0\\ valid_lft forever\n\
+                         12: eth1    inet 10.10.1.10/24 scope global eth1\\ valid_lft forever\n";
+        for (up, state) in [(false, "down"), (true, "up")] {
+            let programs = crate::test_support::FakePrograms::new().printing("ip", addresses);
+            let out = programs.run(&link_script("10.10.1.", up));
+            assert!(out.status.success(), "{out:?}");
+            assert_eq!(
+                programs.calls("ip").last().map(String::as_str),
+                Some(format!("link set eth1 {state}").as_str())
+            );
+        }
+        // No port on the block: nothing is set.
+        let programs = crate::test_support::FakePrograms::new().printing("ip", addresses);
+        assert!(
+            !programs
+                .run(&link_script("10.99.0.", false))
+                .status
+                .success()
+        );
+        assert_eq!(programs.calls("ip"), ["-o -4 addr show"]);
     }
 
     #[test]
@@ -275,8 +297,17 @@ mod tests {
         );
         let (_, one) = ports(&spec, "office", Some(&["b".to_string()])).unwrap();
         assert_eq!(one, ["b"]);
-        assert!(ports(&spec, "office", Some(&["r".to_string()])).is_err());
-        assert!(ports(&spec, "nowhere", None).is_err());
+        assert_eq!(
+            ports(&spec, "office", Some(&["r".to_string()])).unwrap_err(),
+            RunError::NotOnNetwork {
+                machine: "r".into(),
+                network: "office".into()
+            }
+        );
+        assert_eq!(
+            ports(&spec, "nowhere", None).unwrap_err(),
+            RunError::NoNetwork("nowhere".into())
+        );
     }
 
     #[test]
@@ -288,14 +319,12 @@ mod tests {
             [link("wire", "a"), link("office", "a"), link("office", "b")]
         );
         assert_eq!(with(&had, &cut, false), [link("wire", "a")]);
-        let dir = std::env::temp_dir().join(format!("isothrum-links-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new("links");
         save(&dir, &had).unwrap();
         assert_eq!(suspended_links(&dir), had);
         save(&dir, &[]).unwrap();
         assert!(!dir.join(LINKS).exists() && suspended_links(&dir).is_empty());
         clear_links(&dir);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A switch's VLAN is `vlan10` in the editor, `sw1.vlan10` in isoloom.yml and `sw1-vlan10`
@@ -308,8 +337,12 @@ mod tests {
             assert_eq!(spec_network(&spec, name).unwrap(), "sw1-vlan10", "{name}");
         }
         assert_eq!(spec_network(&spec, "office").unwrap(), "office");
-        assert!(spec_network(&spec, "vlan30").is_err());
-        assert!(spec_network(&spec, "sw2.vlan10").is_err());
+        for unknown in ["vlan30", "sw2.vlan10"] {
+            assert_eq!(
+                spec_network(&spec, unknown),
+                Err(RunError::NoNetwork(unknown.into()))
+            );
+        }
         assert_eq!(editor_network(&spec, "sw1-vlan20"), "vlan20");
         assert_eq!(editor_network(&spec, "office"), "office");
         let (prefix, on) = ports(&spec, &spec_network(&spec, "vlan10").unwrap(), None).unwrap();
@@ -319,21 +352,33 @@ mod tests {
     #[test]
     fn a_link_action_is_suspend_or_resume() {
         let spec = crate::runner::spec_for(LAB, crate::runner::Runtime::Docker).unwrap();
-        let dir = std::env::temp_dir().join(format!("isothrum-links-act-{}", std::process::id()));
-        let err = link_action(&dir, &spec, "office", None, "cut").unwrap_err();
-        assert!(err.to_string().contains("suspend or resume"), "{err}");
+        let dir = TempDir::new("links-act");
+        assert_eq!(
+            link_action(&dir, &spec, "office", None, "cut").unwrap_err(),
+            RunError::UnknownAction {
+                action: "cut".into(),
+                expected: "suspend or resume"
+            }
+        );
+        assert!(suspended_links(&dir).is_empty(), "nothing recorded");
     }
 
-    /// Needs Docker (run with `--ignored`): a suspended link carries nothing, and the machine
+    /// A suspended link carries nothing, and the machine
     /// has its routes back once it's resumed; a restarted machine finds its link cut as before.
     #[test]
-    #[ignore]
+    #[ignore = "needs Docker"]
     fn a_suspended_link_carries_nothing_until_resumed() {
-        use crate::runner::{down, machine_action, prepare, up};
-        let dir = std::env::temp_dir().join(format!("isothrum-link-{}", std::process::id()));
-        let yaml = "version: 1\nname: link\nnetworks:\n  a: { cidr: 10.63.1.0/24 }\n  b: { cidr: 10.63.2.0/24 }\nreach: [{ from: a, to: b }]\nmachines:\n  pc: { networks: { a: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n  srv: { networks: { b: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n";
-        let spec = prepare(&dir, yaml, &[]).unwrap();
-        up(&dir).unwrap();
+        use crate::runner::{down, machine_action, prepare};
+        let dir = TempDir::new("link");
+        let yaml = LabYaml::named("link")
+            .network("a", "10.63.1.0/24")
+            .network("b", "10.63.2.0/24")
+            .reach("a", "b")
+            .idle("pc", &[("a", 10)])
+            .idle("srv", &[("b", 10)])
+            .build();
+        let spec = prepare(&dir, &yaml, &[]).unwrap();
+        let _lab = Started::up(&dir);
         let pc = |cmd: &str| {
             run(
                 compose(&dir, &["exec", "-T", "pc", "sh", "-c", cmd]),
@@ -363,6 +408,5 @@ mod tests {
         assert_eq!(suspended_links(&dir).len(), 1);
         down(&dir).unwrap();
         assert!(suspended_links(&dir).is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

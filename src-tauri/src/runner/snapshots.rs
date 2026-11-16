@@ -65,7 +65,7 @@ pub fn take_snapshot(
     let stamp = unique_stamp(&list, machine, created);
     let image = match runtime(dir) {
         Runtime::Docker => commit_container(dir, lab, machine, label, &stamp)?,
-        rt => save_vm(dir, rt, machine, &stamp)?,
+        Runtime::Vagrant => save_vm(dir, machine, &stamp)?,
     };
     let snap = Snapshot {
         id: format!("{machine}-{stamp}"),
@@ -110,15 +110,9 @@ fn commit_container(
 }
 
 /// Saves a VM with Vagrant's own snapshot (the provider's), named like the record.
-fn save_vm(dir: &Path, rt: Runtime, machine: &str, stamp: &str) -> Result<String, RunError> {
-    let spec = lab_spec(dir)?;
-    if crate::vms::in_host(&spec, rt, machine) {
-        return Err(RunError::Spec(
-            "snapshots of a container in a lab with VMs come later: snapshot its VMs".into(),
-        ));
-    }
+fn save_vm(dir: &Path, machine: &str, stamp: &str) -> Result<String, RunError> {
     let name = format!("{machine}-{stamp}");
-    crate::vms::snapshot_save(dir, rt, machine, &name)?;
+    super::vagrant::snapshot_save(dir, machine, &name)?;
     Ok(format!("vagrant:{name}"))
 }
 
@@ -129,12 +123,15 @@ pub fn use_snapshot(dir: &Path, machine: &str, id: Option<&str>) -> Result<Strin
     if let Some(id) = id
         && !list.iter().any(|s| s.id == id && s.machine == machine)
     {
-        return Err(RunError::Spec(format!("no snapshot `{id}` of `{machine}`")));
+        return Err(RunError::NoSnapshot {
+            id: id.into(),
+            machine: Some(machine.into()),
+        });
     }
     // A VM goes back to the snapshot's state and carries on from there: nothing to undo later.
-    let out = if let rt @ (Runtime::Vagrant | Runtime::Hybrid) = runtime(dir) {
+    let out = if runtime(dir) == Runtime::Vagrant {
         match id {
-            Some(id) => crate::vms::snapshot_restore(dir, rt, machine, id)?,
+            Some(id) => super::vagrant::snapshot_restore(dir, machine, id)?,
             None => return Ok(String::new()),
         }
     } else {
@@ -161,17 +158,17 @@ pub fn use_snapshot(dir: &Path, machine: &str, id: Option<&str>) -> Result<Strin
 pub fn delete_snapshot(dir: &Path, id: &str) -> Result<(), RunError> {
     let mut list = snapshots(dir);
     let Some(i) = list.iter().position(|s| s.id == id) else {
-        return Err(RunError::Spec(format!("no snapshot `{id}`")));
+        return Err(RunError::NoSnapshot {
+            id: id.into(),
+            machine: None,
+        });
     };
     if list[i].in_use {
-        return Err(RunError::Spec(format!(
-            "`{}` runs from this snapshot: bring it back to its own image first",
-            list[i].machine
-        )));
+        return Err(RunError::SnapshotInUse(list[i].machine.clone()));
     }
     let snap = list.remove(i);
-    if let rt @ (Runtime::Vagrant | Runtime::Hybrid) = runtime(dir) {
-        crate::vms::snapshot_delete(dir, rt, &snap.machine, &snap.id)?;
+    if runtime(dir) == Runtime::Vagrant {
+        super::vagrant::snapshot_delete(dir, &snap.machine, &snap.id)?;
         return save_snapshots(dir, &list);
     }
     let _ = run(
@@ -188,7 +185,8 @@ pub fn delete_snapshot(dir: &Path, id: &str) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::{down, prepare, up};
+    use crate::runner::prepare;
+    use crate::test_support::{LabYaml, Started, TempDir};
 
     #[test]
     fn two_snapshots_in_one_second_get_their_own_ids() {
@@ -209,14 +207,90 @@ mod tests {
         assert_eq!(unique_stamp(&[snap("pc-100")], "srv", 100), "100");
     }
 
-    /// Needs Docker (run with `--ignored`): a snapshot keeps what was in the machine.
+    fn snapshot(id: &str, machine: &str, in_use: bool) -> Snapshot {
+        Snapshot {
+            id: id.into(),
+            machine: machine.into(),
+            image: format!("isothrum-snapshots/lab-{id}"),
+            label: "snapshot".into(),
+            created: 100,
+            in_use,
+        }
+    }
+
     #[test]
-    #[ignore]
+    fn a_snapshot_is_used_or_deleted_only_when_it_exists_and_isnt_in_use() {
+        // An empty folder: had anything run, `docker` would have found no lab there.
+        let dir = TempDir::new("snaps");
+        save_snapshots(
+            &dir,
+            &[
+                snapshot("pc-100", "pc", true),
+                snapshot("srv-100", "srv", false),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            use_snapshot(&dir, "pc", Some("srv-100")).unwrap_err(),
+            RunError::NoSnapshot {
+                id: "srv-100".into(),
+                machine: Some("pc".into())
+            },
+            "another machine's snapshot"
+        );
+        assert_eq!(
+            delete_snapshot(&dir, "pc-999").unwrap_err(),
+            RunError::NoSnapshot {
+                id: "pc-999".into(),
+                machine: None
+            }
+        );
+        assert_eq!(
+            delete_snapshot(&dir, "pc-100").unwrap_err(),
+            RunError::SnapshotInUse("pc".into())
+        );
+        assert_eq!(snapshots(&dir).len(), 2, "both still recorded");
+    }
+
+    #[test]
+    fn a_machine_in_use_from_a_snapshot_runs_its_image() {
+        let dir = TempDir::new("override");
+        let args = |dir: &Path| -> Vec<String> {
+            compose(dir, &["up"])
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        save_snapshots(&dir, &[snapshot("pc-100", "pc", true)]).unwrap();
+        let file = std::fs::read_to_string(dir.join(SNAPSHOT_OVERRIDE)).unwrap();
+        let services: serde_yaml_ng::Value = serde_yaml_ng::from_str(&file).unwrap();
+        assert_eq!(
+            services["services"]["pc"]["image"].as_str(),
+            Some("isothrum-snapshots/lab-pc-100")
+        );
+        assert!(
+            args(&dir)
+                .windows(2)
+                .any(|w| w == ["-f", SNAPSHOT_OVERRIDE]),
+            "Compose runs with it"
+        );
+        // Back to its own image: no override left, and Compose runs without one.
+        save_snapshots(&dir, &[snapshot("pc-100", "pc", false)]).unwrap();
+        assert!(!dir.join(SNAPSHOT_OVERRIDE).exists());
+        assert!(!args(&dir).contains(&SNAPSHOT_OVERRIDE.to_string()));
+    }
+
+    /// A snapshot keeps what was in the machine.
+    #[test]
+    #[ignore = "needs Docker"]
     fn a_snapshot_brings_a_machine_back_as_it_was() {
-        let dir = std::env::temp_dir().join(format!("isothrum-snap-{}", std::process::id()));
-        let yaml = "version: 1\nname: snap\nnetworks:\n  a: { cidr: 10.62.1.0/24 }\nmachines:\n  pc: { networks: { a: 10 }, app: { image: \"alpine:3.20\" }, command: [sleep, infinity] }\n";
-        prepare(&dir, yaml, &[]).unwrap();
-        up(&dir).unwrap();
+        let dir = TempDir::new("snap");
+        let yaml = LabYaml::named("snap")
+            .network("a", "10.62.1.0/24")
+            .idle("pc", &[("a", 10)])
+            .build();
+        prepare(&dir, &yaml, &[]).unwrap();
+        let _lab = Started::up(&dir);
         let sh = |cmd: &str| {
             run(
                 compose(&dir, &["exec", "-T", "pc", "sh", "-c", cmd]),
@@ -240,7 +314,5 @@ mod tests {
             .output()
             .unwrap();
         assert!(!gone.status.success(), "its image is removed");
-        down(&dir).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

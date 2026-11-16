@@ -4,63 +4,48 @@
 
 mod capabilities;
 mod captures;
+mod commands;
 mod console;
-mod lab_files;
 mod lab_name;
 mod runner;
 mod terminal;
+#[cfg(test)]
+mod test_support;
 mod tools;
-mod vms;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Serialize;
 
 use captures::Captures;
-use lab_name::checked;
+use runner::RunError;
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 // The window shows the editor bundled with the app (`apps/desktop/editor`, built from the website
 // by `npm run editor`): it works offline. `ISOTHRUM_URL` points it at a site instead (isothrum.com
 // for accounts and saved projects, or a local build while developing).
+//
+// Each command finds the app's data folder and runs its body (`commands.rs`, where it is tested)
+// off the window's thread; the editor gets an error as its text.
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|e| e.to_string())
 }
 
-#[derive(Serialize)]
-struct DesktopInfo {
-    version: &'static str,
-    /// Whether `docker` answers (installed, running, and this user may use it).
-    docker: bool,
-    /// Whether Vagrant is installed (labs with VMs run with it).
-    vagrant: bool,
-    wireshark: bool,
-    /// Wireshark can show captures live (its `dumpcap` is usable by this account).
-    live_capture: bool,
-    labs: String,
+/// Runs `body` off the window's thread.
+async fn blocking<T: Send + 'static>(
+    body: impl FnOnce() -> Result<T, RunError> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(body)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(String::from)
 }
 
 #[tauri::command]
-async fn desktop_info(app: AppHandle) -> Result<DesktopInfo, String> {
-    let labs = data_dir(&app)?.join("labs").display().to_string();
-    let docker = tauri::async_runtime::spawn_blocking(|| {
-        std::process::Command::new("docker")
-            .args(["info", "--format", "{{.ServerVersion}}"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
-    Ok(DesktopInfo {
-        version: env!("CARGO_PKG_VERSION"),
-        docker,
-        vagrant: tools::has("vagrant"),
-        wireshark: tools::has("wireshark"),
-        live_capture: runner::live_capture_possible(),
-        labs,
-    })
+async fn desktop_info(app: AppHandle) -> Result<commands::DesktopInfo, String> {
+    let data = data_dir(&app)?;
+    blocking(move || Ok(commands::desktop_info(&data))).await
 }
 
 /// One of the lab's own files (a provisioning script, an appliance's configuration).
@@ -78,88 +63,48 @@ async fn environment_up(
     yaml: String,
     files: Option<Vec<LabFile>>,
 ) -> Result<String, String> {
-    let dir = runner::lab_dir(&data_dir(&app)?, checked(&name)?);
+    let data = data_dir(&app)?;
     let own: Vec<(String, String)> = files
         .unwrap_or_default()
         .into_iter()
         .map(|f| (f.path, f.contents))
         .collect();
-    tauri::async_runtime::spawn_blocking(move || {
-        runner::prepare(&dir, &yaml, &own)?;
-        runner::up(&dir)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    blocking(move || commands::environment_up(&data, &name, &yaml, &own)).await
 }
 
 #[tauri::command]
-async fn environment_down(
-    app: AppHandle,
-    captures: State<'_, Captures>,
-    name: String,
-) -> Result<String, String> {
-    let name = checked(&name)?.to_string();
-    // Stopping the lab ends its captures too.
-    captures.stop_lab(&name);
-    let dir = runner::lab_dir(&data_dir(&app)?, &name);
-    tauri::async_runtime::spawn_blocking(move || runner::down(&dir))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+async fn environment_down(app: AppHandle, name: String) -> Result<String, String> {
+    let data = data_dir(&app)?;
+    blocking(move || commands::environment_down(&data, &app.state::<Captures>(), &name)).await
 }
 
 #[tauri::command]
 async fn environment_status(app: AppHandle, name: String) -> Result<String, String> {
-    let dir = runner::lab_dir(&data_dir(&app)?, checked(&name)?);
-    if !runner::prepared(&dir) {
-        return Ok(String::new());
-    }
-    tauri::async_runtime::spawn_blocking(move || runner::status(&dir))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+    let data = data_dir(&app)?;
+    blocking(move || commands::environment_status(&data, &name)).await
 }
 
-#[derive(Serialize)]
-struct CaptureStarted {
-    /// Where the packets are written when Wireshark isn't installed; `None`: Wireshark is open.
-    file: Option<String>,
-}
-
-/// Where a capture without Wireshark goes: `<data>/captures/<lab>-<network>-<seconds>.pcap`.
-fn capture_file(data: &Path, lab: &str, network: &str) -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    data.join("captures")
-        .join(format!("{lab}-{network}-{stamp}.pcap"))
+/// The environment now: each machine's state, and each machine's port on each network, up or down
+/// (read from the machines). Empty when the environment hasn't been started.
+#[tauri::command]
+async fn environment_live(
+    app: AppHandle,
+    name: String,
+) -> Result<Option<runner::EnvironmentLive>, String> {
+    let data = data_dir(&app)?;
+    blocking(move || commands::environment_live(&data, &name)).await
 }
 
 /// Captures a LAN's or a cable's traffic (`network` is its name in isoloom.yml).
 #[tauri::command]
 async fn capture_start(
     app: AppHandle,
-    captures: State<'_, Captures>,
     name: String,
     network: String,
-) -> Result<CaptureStarted, String> {
-    let name = checked(&name)?.to_string();
+) -> Result<commands::CaptureStarted, String> {
     let data = data_dir(&app)?;
-    let dir = runner::lab_dir(&data, &name);
-    let file = capture_file(&data, &name, &network);
-    let net = network.clone();
-    let capture = tauri::async_runtime::spawn_blocking(move || {
-        let plan = runner::plan_capture(&dir, &runner::lab_spec(&dir)?, &net)?;
-        runner::start_capture(&plan, &file)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
-    let file = capture.file.as_ref().map(|f| f.display().to_string());
-    captures.add(&name, &network, capture);
-    Ok(CaptureStarted { file })
+    blocking(move || commands::capture_start(&data, &app.state::<Captures>(), &name, &network))
+        .await
 }
 
 #[tauri::command]
@@ -168,37 +113,26 @@ fn capture_stop(
     name: String,
     network: String,
 ) -> Result<(), String> {
-    captures.stop(checked(&name)?, &network);
-    Ok(())
+    Ok(commands::capture_stop(&captures, &name, &network)?)
 }
 
 /// Opens a terminal on one machine of the running lab (a shell, or SSH to a network appliance).
 #[tauri::command]
 async fn machine_console(app: AppHandle, name: String, machine: String) -> Result<(), String> {
-    let name = checked(&name)?.to_string();
-    let dir = runner::lab_dir(&data_dir(&app)?, &name);
-    tauri::async_runtime::spawn_blocking(move || {
-        let spec = runner::lab_spec(&dir)?;
-        let cmd = runner::console_command(&dir, &spec, &machine)?;
-        terminal::open_terminal(&format!("{machine} ({name})"), &cmd)
+    let data = data_dir(&app)?;
+    blocking(move || {
+        let (title, console) = commands::machine_console(&data, &name, &machine)?;
+        terminal::open_terminal(&title, &console)
     })
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
 }
 
 /// Opens one machine's screen (GNS3's VNC console): a container's VNC server, or a VM's display.
 /// Returns what was opened (a `vnc://` address, or the VM's window).
 #[tauri::command]
 async fn machine_display(app: AppHandle, name: String, machine: String) -> Result<String, String> {
-    let dir = runner::lab_dir(&data_dir(&app)?, checked(&name)?);
-    tauri::async_runtime::spawn_blocking(move || {
-        let spec = runner::lab_spec(&dir)?;
-        runner::open_display(&dir, &spec, &machine)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    let data = data_dir(&app)?;
+    blocking(move || commands::machine_display(&data, &name, &machine)).await
 }
 
 /// Starts, stops or restarts one machine of the running lab.
@@ -209,45 +143,14 @@ async fn machine_action(
     machine: String,
     action: String,
 ) -> Result<String, String> {
-    let dir = runner::lab_dir(&data_dir(&app)?, checked(&name)?);
-    tauri::async_runtime::spawn_blocking(move || {
-        let spec = runner::lab_spec(&dir)?;
-        runner::machine_action(&dir, &spec, &machine, &action)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
-}
-
-/// The environment now: each machine's state, and each machine's port on each network, up or down
-/// (read from the machines). Empty when the environment hasn't been started.
-#[tauri::command]
-async fn environment_live(
-    app: AppHandle,
-    name: String,
-) -> Result<Option<runner::EnvironmentLive>, String> {
-    let dir = runner::lab_dir(&data_dir(&app)?, checked(&name)?);
-    if !runner::prepared(&dir) {
-        return Ok(None);
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let spec = runner::lab_spec(&dir)?;
-        runner::environment_live(&dir, &spec).map(Some)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    let data = data_dir(&app)?;
+    blocking(move || commands::machine_action(&data, &name, &machine, &action)).await
 }
 
 /// The lab's suspended links (a machine's port on a network, cut).
 #[tauri::command]
 fn link_list(app: AppHandle, name: String) -> Result<Vec<runner::Link>, String> {
-    let dir = runner::lab_dir(&data_dir(&app)?, checked(&name)?);
-    let links = runner::suspended_links(&dir);
-    Ok(match runner::lab_spec(&dir) {
-        Ok(spec) => runner::editor_links(&spec, links),
-        Err(_) => links,
-    })
+    Ok(commands::link_list(&data_dir(&app)?, &name)?)
 }
 
 /// Suspends or resumes a link of the running lab: the ports of `machines` on `network` (a
@@ -260,23 +163,14 @@ async fn link_action(
     machines: Option<Vec<String>>,
     action: String,
 ) -> Result<Vec<runner::Link>, String> {
-    let dir = runner::lab_dir(&data_dir(&app)?, checked(&name)?);
-    tauri::async_runtime::spawn_blocking(move || {
-        let spec = runner::lab_spec(&dir)?;
-        runner::link_action(&dir, &spec, &network, machines, &action)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    let data = data_dir(&app)?;
+    blocking(move || commands::link_action(&data, &name, &network, machines, &action)).await
 }
 
 /// The lab's snapshots.
 #[tauri::command]
 fn snapshot_list(app: AppHandle, name: String) -> Result<Vec<runner::Snapshot>, String> {
-    Ok(runner::snapshots(&runner::lab_dir(
-        &data_dir(&app)?,
-        checked(&name)?,
-    )))
+    Ok(commands::snapshot_list(&data_dir(&app)?, &name)?)
 }
 
 /// Saves one machine of the running lab.
@@ -287,14 +181,8 @@ async fn snapshot_take(
     machine: String,
     label: String,
 ) -> Result<runner::Snapshot, String> {
-    let name = checked(&name)?.to_string();
-    let dir = runner::lab_dir(&data_dir(&app)?, &name);
-    tauri::async_runtime::spawn_blocking(move || {
-        runner::take_snapshot(&dir, &name, &machine, &label)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    let data = data_dir(&app)?;
+    blocking(move || commands::snapshot_take(&data, &name, &machine, &label)).await
 }
 
 /// Runs a machine from one of its snapshots (`id`), or from its own image again (no `id`).
@@ -305,22 +193,14 @@ async fn snapshot_use(
     machine: String,
     id: Option<String>,
 ) -> Result<String, String> {
-    let dir = runner::lab_dir(&data_dir(&app)?, checked(&name)?);
-    tauri::async_runtime::spawn_blocking(move || {
-        runner::use_snapshot(&dir, &machine, id.as_deref())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    let data = data_dir(&app)?;
+    blocking(move || commands::snapshot_use(&data, &name, &machine, id.as_deref())).await
 }
 
 #[tauri::command]
 async fn snapshot_delete(app: AppHandle, name: String, id: String) -> Result<(), String> {
-    let dir = runner::lab_dir(&data_dir(&app)?, checked(&name)?);
-    tauri::async_runtime::spawn_blocking(move || runner::delete_snapshot(&dir, &id))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+    let data = data_dir(&app)?;
+    blocking(move || commands::snapshot_delete(&data, &name, &id)).await
 }
 
 /// A newer release, if there is one (the updater checks GitHub's latest release, signed with
