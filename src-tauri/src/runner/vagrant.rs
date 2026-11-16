@@ -163,30 +163,49 @@ fn base64(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// The VMs' states reach the editor as a lab of containers' do: read by the same reader.
     #[test]
-    fn vagrant_states_become_the_editors_json_lines() {
+    fn vagrant_states_read_as_the_machines_states() {
+        use crate::runner::live::{MachineLive, machine_states};
+        use crate::runner::spec_for;
+        use crate::test_support::LabYaml;
         let out = "1700000000,,metadata,provider,virtualbox\n1700000000,web,state,running\n1700000000,db,state,poweroff\n1700000000,web,state-human-short,running\n";
+        let spec = spec_for(
+            &LabYaml::named("vms")
+                .network("a", "10.10.1.0/24")
+                .machine("web", &[("a", 10)])
+                .machine("db", &[("a", 11)])
+                .build(),
+            crate::runner::Runtime::Docker,
+        )
+        .unwrap();
+        let state = |s: &str| MachineLive {
+            state: s.into(),
+            health: String::new(),
+        };
         assert_eq!(
-            states(out),
-            "{\"Service\":\"web\",\"State\":\"running\"}\n{\"Service\":\"db\",\"State\":\"exited\"}"
+            machine_states(&spec, &states(out)),
+            [
+                ("db".to_string(), state("exited")),
+                ("web".to_string(), state("running"))
+            ]
+            .into()
         );
     }
 
-    /// GNU `base64` (`-w0`): Linux only.
+    /// RFC 4648's test vectors (section 10).
     #[test]
-    #[cfg(target_os = "linux")]
-    fn base64_matches_the_systems() {
-        for s in ["", "a", "ab", "abc", "echo 'a b' && awk '{print $2}'\n"] {
-            let sys = Command::new("sh")
-                .args(["-c", "printf %s \"$0\" | base64 -w0", s])
-                .output()
-                .unwrap()
-                .stdout;
-            assert_eq!(
-                base64(s.as_bytes()),
-                String::from_utf8(sys).unwrap(),
-                "{s:?}"
-            );
+    fn base64_is_the_standard_padded_one() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(plain.as_bytes()), encoded, "{plain:?}");
         }
     }
 

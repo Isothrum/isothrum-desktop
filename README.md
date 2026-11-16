@@ -85,12 +85,14 @@ Windows. The tests that need Docker or Vagrant run on the maintainers' test mach
   test that file's functions: what `runner/links.rs` does is tested in `runner/links.rs`.
 - **Shared helpers** are in `src-tauri/src/test_support.rs` (built for tests only): `TempDir` (a
   folder of the test's own, removed when it ends), `LabYaml` (an isoloom.yml from networks and
-  machines), `Started` (a lab started, and stopped when the test ends, even failing) and
-  `eventually` (poll a check to a deadline).
+  machines), `Started` (a lab started, and stopped when the test ends, even failing),
+  `eventually` (poll a check to a deadline) and `FakePrograms` (stand-ins for `ip`, `tcpdump`,
+  `nsenter`..., which answer what the test gives them and record how they were called).
 - **Names**: a test's name is the behaviour it proves, as a sentence (`a_new_capture_of_a_network_stops_the_old_one`).
   Cases of one behaviour are one test over a table, not one test each.
-- **What is asserted**: values, error variants and parsed output, not the words of a message or
-  substrings of a script.
+- **What is asserted**: values, error variants (`RunError::UnknownAction { .. }`) and parsed
+  output, not the words of a message or substrings of a script: a script the app runs in a
+  machine is run by `sh` against `FakePrograms`, and what they were asked is checked.
 - **Docker and Vagrant**: a test that needs them is `#[ignore = "needs Docker"]` (or
   `"needs Vagrant"`), run by `npm run check:real`, not by CI. Such a test waits by polling to a
   deadline (`eventually`), never by a fixed sleep.

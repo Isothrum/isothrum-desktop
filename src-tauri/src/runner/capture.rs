@@ -260,11 +260,50 @@ fn into_file(mut dump: Command, file: &Path) -> Result<Child, RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::test_support::FakePrograms;
     use crate::test_support::{LabYaml, Started, TempDir, eventually};
     use std::time::Duration;
 
+    /// What `ip -o -4 addr show` prints in a machine on a LAN, a cable and a switch's VLAN.
+    #[cfg(unix)]
+    const ADDRESSES: &str = "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever
+11: eth0    inet 10.10.10.5/24 brd 10.10.10.255 scope global eth0\\       valid_lft forever
+12: eth1    inet 10.10.1.10/24 brd 10.10.1.255 scope global eth1\\       valid_lft forever
+13: eth2.10@eth2    inet 10.65.10.10/24 brd 10.65.10.255 scope global eth2.10\\       valid_lft forever
+";
+
     #[test]
-    fn the_capture_finds_the_interface_by_its_network() {
+    #[cfg(unix)]
+    fn the_capture_streams_the_interface_on_its_network() {
+        // `10.10.1.` is eth1's, not eth0's 10.10.10.5; a VLAN's interface goes without its parent.
+        for (prefix, interface) in [("10.10.1.", "eth1"), ("10.65.10.", "eth2.10")] {
+            let programs = FakePrograms::new()
+                .printing("ip", ADDRESSES)
+                .printing("tcpdump", "");
+            let out = programs.run(&capture_script(prefix));
+            assert!(out.status.success(), "{prefix}: {out:?}");
+            assert_eq!(
+                programs.calls("tcpdump"),
+                [format!("-i {interface} -U -w -")],
+                "{prefix}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn no_capture_starts_without_an_interface_on_the_network() {
+        let programs = FakePrograms::new()
+            .printing("ip", ADDRESSES)
+            .printing("tcpdump", "");
+        let out = programs.run(&capture_script("10.99.0."));
+        assert!(!out.status.success());
+        assert!(programs.calls("tcpdump").is_empty());
+    }
+
+    #[test]
+    fn a_networks_prefix_is_its_blocks_first_three_octets() {
         assert_eq!(prefix_of("10.10.1.0/24").as_deref(), Some("10.10.1."));
         assert_eq!(prefix_of("10.200.0.8/29").as_deref(), Some("10.200.0."));
         // What goes into a script is digits and dots only.
@@ -275,9 +314,6 @@ mod tests {
                 "{cidr}"
             );
         }
-        let script = capture_script("10.10.1.");
-        assert!(script.contains("p='10.10.1.'"));
-        assert!(script.contains("exec tcpdump -i \"$IF\" -U -w -"));
     }
 
     #[test]

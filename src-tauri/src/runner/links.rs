@@ -263,11 +263,28 @@ mod tests {
     }
 
     #[test]
-    fn the_script_sets_the_port_on_the_block() {
-        let down = link_script("10.10.1.", false);
-        assert!(down.contains("index($4, p) == 1") && down.contains("p='10.10.1.'"));
-        assert!(down.ends_with("ip link set \"$IF\" down"), "{down}");
-        assert!(link_script("10.10.1.", true).ends_with("ip link set \"$IF\" up"));
+    #[cfg(unix)]
+    fn the_script_sets_the_port_on_the_block_down_or_up() {
+        let addresses = "11: eth0    inet 10.10.10.5/24 scope global eth0\\ valid_lft forever\n\
+                         12: eth1    inet 10.10.1.10/24 scope global eth1\\ valid_lft forever\n";
+        for (up, state) in [(false, "down"), (true, "up")] {
+            let programs = crate::test_support::FakePrograms::new().printing("ip", addresses);
+            let out = programs.run(&link_script("10.10.1.", up));
+            assert!(out.status.success(), "{out:?}");
+            assert_eq!(
+                programs.calls("ip").last().map(String::as_str),
+                Some(format!("link set eth1 {state}").as_str())
+            );
+        }
+        // No port on the block: nothing is set.
+        let programs = crate::test_support::FakePrograms::new().printing("ip", addresses);
+        assert!(
+            !programs
+                .run(&link_script("10.99.0.", false))
+                .status
+                .success()
+        );
+        assert_eq!(programs.calls("ip"), ["-o -4 addr show"]);
     }
 
     #[test]

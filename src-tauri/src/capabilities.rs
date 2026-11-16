@@ -52,7 +52,7 @@ mod tests {
             editor["remote"]["urls"],
             serde_json::json!(["https://www.isothrum.com/*"])
         );
-        assert!(!EDITOR.contains("localhost") && !EDITOR.contains("127.0.0.1"));
+        assert_eq!(editor["windows"], serde_json::json!(["main"]));
     }
 
     /// The updater's file for macOS is the `.app` bundle, archived (`Isothrum.app.tar.gz`): without
@@ -69,11 +69,21 @@ mod tests {
     }
 
     #[test]
-    fn the_bundled_editor_has_a_csp() {
+    fn the_bundled_editor_runs_only_its_own_scripts() {
         let conf: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let csp = conf["app"]["security"]["csp"].as_str().unwrap_or_default();
-        assert!(csp.contains("default-src 'self'"), "{csp}");
-        assert!(csp.contains("object-src 'none'"), "{csp}");
+        // Directive -> its sources.
+        let directives: std::collections::BTreeMap<&str, Vec<&str>> = csp
+            .split(';')
+            .filter_map(|d| {
+                let mut words = d.split_whitespace();
+                Some((words.next()?, words.collect()))
+            })
+            .collect();
+        assert_eq!(directives["default-src"], ["'self'"]);
+        assert_eq!(directives["object-src"], ["'none'"]);
+        // Its own scripts and WebAssembly (the engine): nothing inline, no eval.
+        assert_eq!(directives["script-src"], ["'self'", "'wasm-unsafe-eval'"]);
     }
 }

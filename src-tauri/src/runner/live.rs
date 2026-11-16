@@ -273,11 +273,32 @@ mod tests {
         assert!(seen["a"].up["eth0"]);
         assert!(!seen["a"].up["eth1"]);
         assert_eq!(seen["b"], Seen::default());
-        let script = probe_script(&[("a".into(), 42)]);
-        assert!(
-            script.contains("nsenter -t 42 -n ip -o -4 addr show"),
-            "{script}"
+    }
+
+    /// The probe's script and its parser agree: each machine's namespace (by its PID) is read,
+    /// and what it printed comes back under that machine.
+    #[test]
+    #[cfg(unix)]
+    fn what_the_probe_prints_is_read_back_per_machine() {
+        let nsenter = r#"case "$2 $*" in
+  "42 "*"addr show") echo '11: eth0    inet 10.10.1.10/24 scope global eth0\ valid_lft forever' ;;
+  "42 "*"link show") echo '11: eth0@if9: <BROADCAST,UP,LOWER_UP> mtu 1500 state UP' ;;
+  "43 "*"addr show") echo '21: eth0    inet 10.10.1.11/24 scope global eth0\ valid_lft forever' ;;
+  "43 "*"link show") echo '21: eth0@if8: <BROADCAST> mtu 1500 state DOWN' ;;
+esac"#;
+        let programs = crate::test_support::FakePrograms::new().program("nsenter", nsenter);
+        let out = programs.run(&probe_script(&[("a".into(), 42), ("b".into(), 43)]));
+        assert!(out.status.success(), "{out:?}");
+        let seen = parse_probe(&String::from_utf8_lossy(&out.stdout));
+        assert_eq!(
+            seen["a"],
+            Seen {
+                addresses: vec![("eth0".into(), "10.10.1.10/24".into())],
+                up: [("eth0".to_string(), true)].into(),
+            }
         );
+        assert!(!seen["b"].up["eth0"], "b's port has no carrier");
+        assert_eq!(programs.calls("nsenter").len(), 4, "two reads per machine");
     }
 
     #[test]
