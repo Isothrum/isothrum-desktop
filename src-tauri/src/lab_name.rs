@@ -1,7 +1,9 @@
 //! Lab names come from the editor and become folder names: kebab-case only, nothing else.
 
+use crate::runner::RunError;
+
 /// `name` when it is a lab name (lowercase letters, digits and dashes, at most 63).
-pub fn checked(name: &str) -> Result<&str, String> {
+pub fn checked(name: &str) -> Result<&str, RunError> {
     let ok = !name.is_empty()
         && name.len() <= 63
         && name
@@ -10,9 +12,7 @@ pub fn checked(name: &str) -> Result<&str, String> {
     if ok {
         Ok(name)
     } else {
-        Err(format!(
-            "`{name}` isn't a lab name (lowercase letters, digits and dashes)"
-        ))
+        Err(RunError::LabName(name.into()))
     }
 }
 
@@ -34,7 +34,7 @@ mod tests {
             "a\\b",
             long.as_str(),
         ] {
-            assert!(checked(bad).is_err(), "{bad}");
+            assert_eq!(checked(bad), Err(RunError::LabName(bad.into())), "{bad}");
         }
     }
 }

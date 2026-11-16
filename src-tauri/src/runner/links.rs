@@ -9,7 +9,7 @@ use std::process::Command;
 
 use isoloom_spec::model::Spec;
 
-use super::capture::{CAPTURE_IMAGE, interface_script, prefix_of};
+use super::capture::{CAPTURE_IMAGE, interface_script, ipv4_prefix};
 use super::machines::{running_container, with_sidecar};
 use super::{RunError, Runtime, compose, run, runtime};
 
@@ -82,10 +82,8 @@ fn ports(
     let net = spec
         .networks
         .get(network)
-        .ok_or_else(|| RunError::Spec(format!("the lab has no network `{network}`")))?;
-    let prefix = prefix_of(&net.cidr)
-        .filter(|p| p.chars().all(|c| c.is_ascii_digit() || c == '.'))
-        .ok_or_else(|| RunError::Spec(format!("`{}` isn't an IPv4 block", net.cidr)))?;
+        .ok_or_else(|| RunError::NoNetwork(network.into()))?;
+    let prefix = ipv4_prefix(&net.cidr)?;
     let on_network = |m: &str| {
         spec.machines
             .get(m)
@@ -94,7 +92,10 @@ fn ports(
     let names: Vec<String> = match machines {
         Some(named) => {
             if let Some(m) = named.iter().find(|m| !on_network(m)) {
-                return Err(RunError::Spec(format!("`{m}` isn't on `{network}`")));
+                return Err(RunError::NotOnNetwork {
+                    machine: m.clone(),
+                    network: network.into(),
+                });
             }
             named.to_vec()
         }
@@ -106,7 +107,10 @@ fn ports(
             .collect(),
     };
     if names.is_empty() {
-        return Err(RunError::Spec(format!("no machine is on `{network}`")));
+        return Err(RunError::NobodyOn {
+            network: network.into(),
+            containers: false,
+        });
     }
     Ok((prefix, names))
 }
@@ -126,9 +130,10 @@ pub fn link_action(
         "suspend" => true,
         "resume" => false,
         other => {
-            return Err(RunError::Spec(format!(
-                "unknown action `{other}`: suspend or resume"
-            )));
+            return Err(RunError::UnknownAction {
+                action: other.into(),
+                expected: "suspend or resume",
+            });
         }
     };
     // Recorded by the spec's name (what the machines are on); reported by the editor's.
@@ -275,8 +280,17 @@ mod tests {
         );
         let (_, one) = ports(&spec, "office", Some(&["b".to_string()])).unwrap();
         assert_eq!(one, ["b"]);
-        assert!(ports(&spec, "office", Some(&["r".to_string()])).is_err());
-        assert!(ports(&spec, "nowhere", None).is_err());
+        assert_eq!(
+            ports(&spec, "office", Some(&["r".to_string()])).unwrap_err(),
+            RunError::NotOnNetwork {
+                machine: "r".into(),
+                network: "office".into()
+            }
+        );
+        assert_eq!(
+            ports(&spec, "nowhere", None).unwrap_err(),
+            RunError::NoNetwork("nowhere".into())
+        );
     }
 
     #[test]
@@ -306,8 +320,12 @@ mod tests {
             assert_eq!(spec_network(&spec, name).unwrap(), "sw1-vlan10", "{name}");
         }
         assert_eq!(spec_network(&spec, "office").unwrap(), "office");
-        assert!(spec_network(&spec, "vlan30").is_err());
-        assert!(spec_network(&spec, "sw2.vlan10").is_err());
+        for unknown in ["vlan30", "sw2.vlan10"] {
+            assert_eq!(
+                spec_network(&spec, unknown),
+                Err(RunError::NoNetwork(unknown.into()))
+            );
+        }
         assert_eq!(editor_network(&spec, "sw1-vlan20"), "vlan20");
         assert_eq!(editor_network(&spec, "office"), "office");
         let (prefix, on) = ports(&spec, &spec_network(&spec, "vlan10").unwrap(), None).unwrap();
@@ -318,8 +336,14 @@ mod tests {
     fn a_link_action_is_suspend_or_resume() {
         let spec = crate::runner::spec_for(LAB, crate::runner::Runtime::Docker).unwrap();
         let dir = TempDir::new("links-act");
-        let err = link_action(&dir, &spec, "office", None, "cut").unwrap_err();
-        assert!(err.to_string().contains("suspend or resume"), "{err}");
+        assert_eq!(
+            link_action(&dir, &spec, "office", None, "cut").unwrap_err(),
+            RunError::UnknownAction {
+                action: "cut".into(),
+                expected: "suspend or resume"
+            }
+        );
+        assert!(suspended_links(&dir).is_empty(), "nothing recorded");
     }
 
     /// A suspended link carries nothing, and the machine

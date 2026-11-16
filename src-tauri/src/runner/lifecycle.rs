@@ -19,13 +19,7 @@ pub fn generated(lab: &Lab) -> Result<(Runtime, Vec<GeneratedFile>), RunError> {
                 .ok()
                 .map(|f| (rt, f))
         })
-        .ok_or_else(|| {
-            RunError::NotDocker(
-                "This lab runs neither as containers nor as local VMs: export it and run it with \
-             `isoloom run` on a target that fits it."
-                    .into(),
-            )
-        })
+        .ok_or(RunError::NoLocalTarget)
 }
 
 /// Checks the spec and writes it with its generated files into `dir`: Docker's when every machine
@@ -34,19 +28,32 @@ pub fn generated(lab: &Lab) -> Result<(Runtime, Vec<GeneratedFile>), RunError> {
 /// isoloom.yml gives them (relative, inside the lab's folder).
 pub fn prepare(dir: &Path, yaml: &str, own: &[(String, String)]) -> Result<Spec, RunError> {
     if let Some((path, _)) = own.iter().find(|(p, _)| !lab_files::inside_lab(p)) {
-        return Err(RunError::Spec(format!(
-            "`{path}` isn't a path inside the lab"
-        )));
+        return Err(RunError::NotInsideLab(path.clone()));
     }
     let lab = valid_lab(yaml)?;
     let (runtime, generated) = generated(&lab)?;
-    if runtime != Runtime::Docker && !has("vagrant") {
-        return Err(RunError::NotDocker(
-            "This lab has VMs: they run with Vagrant (and VirtualBox or libvirt), which isn't \
-             installed. Install it from vagrantup.com, or export the lab."
-                .into(),
-        ));
+    runnable(runtime, has("vagrant"))?;
+    write_lab(dir, yaml, runtime, &generated, own)?;
+    Ok(lab.for_target(runtime.target()))
+}
+
+/// Whether this machine can run a lab on `runtime`: Vagrant's needs it installed.
+fn runnable(runtime: Runtime, vagrant_installed: bool) -> Result<(), RunError> {
+    if runtime == Runtime::Vagrant && !vagrant_installed {
+        return Err(RunError::VagrantMissing);
     }
+    Ok(())
+}
+
+/// Writes the lab into its folder: isoloom.yml, the runtime it runs on, the generated files and
+/// its own.
+fn write_lab(
+    dir: &Path,
+    yaml: &str,
+    runtime: Runtime,
+    generated: &[GeneratedFile],
+    own: &[(String, String)],
+) -> Result<(), RunError> {
     lab_files::write(dir, "isoloom.yml", yaml)?;
     lab_files::write(dir, RUNTIME, runtime.name())?;
     let files: Vec<(&str, &str)> = generated
@@ -54,8 +61,7 @@ pub fn prepare(dir: &Path, yaml: &str, own: &[(String, String)]) -> Result<Spec,
         .map(|f| (f.path.as_str(), f.contents.as_str()))
         .chain(own.iter().map(|(p, c)| (p.as_str(), c.as_str())))
         .collect();
-    lab_files::write_all(dir, &files)?;
-    Ok(lab.for_target(runtime.target()))
+    lab_files::write_all(dir, &files)
 }
 
 /// The lab in `yaml`, when Isoloom finds no problem in it.
@@ -117,21 +123,16 @@ pub fn status(dir: &Path) -> Result<String, RunError> {
 mod tests {
     use super::*;
     use crate::runner::{lab_spec, prepared};
-    use crate::test_support::TempDir;
+    use crate::test_support::{LabYaml, TempDir};
 
-    const CONTAINERS: &str = r#"
-version: 1
-name: pair
-networks:
-  office: { cidr: 10.10.1.0/24 }
-machines:
-  a:
-    networks: { office: 10 }
-    app: { image: "alpine:3.20" }
-  b:
-    networks: { office: 11 }
-    app: { image: "alpine:3.20" }
-"#;
+    /// Two Alpine containers on a LAN.
+    fn containers() -> String {
+        LabYaml::named("pair")
+            .network("office", "10.10.1.0/24")
+            .machine("a", &[("office", 10)])
+            .machine("b", &[("office", 11)])
+            .build()
+    }
 
     /// A container machine with an OS (a VM form too) beside a Windows VM: Vagrant runs both.
     const WITH_VM: &str = r#"
@@ -149,32 +150,82 @@ machines:
     app: { steps: [{ run: provision/b.ps1 }] }
 "#;
 
-    #[test]
-    fn a_lab_of_containers_gets_its_compose_file() {
-        let dir = TempDir::new("prepare");
-        let spec = prepare(&dir, CONTAINERS, &[]).unwrap();
-        assert_eq!(spec.name, "pair");
-        let compose = std::fs::read_to_string(dir.join(".isoloom/docker/compose.yml")).unwrap();
-        assert!(compose.contains("name: pair"));
-        assert!(dir.join("isoloom.yml").is_file());
+    /// The lab the editor's compiler writes for a drawing (its nodes, on one LAN).
+    fn compiled(nodes: &str) -> String {
+        let topology = format!(
+            r#"{{"name":"drawn","networks":{{"office":{{"cidr":"10.10.1.0/24"}}}},"nodes":{{{nodes}}}}}"#
+        );
+        let topo: isoloom_topology::Topology = serde_json::from_str(&topology).unwrap();
+        isoloom_topology::compile(&topo).unwrap().into_parts().0
     }
 
-    /// The lab the editor's compiler writes for a drawing.
-    fn compiled(topology: &str) -> String {
-        let topo: isoloom_topology::Topology = serde_json::from_str(topology).unwrap();
-        isoloom_topology::compile(&topo).unwrap().into_parts().0
+    const WEB: &str = r#""web":{"kind":{"container":{"image":"nginx:1.27-alpine"}},"services":[{"port":80,"protocol":"http"}],"networks":{"office":null}}"#;
+    const USER: &str = r#""user":{"kind":{"container":{"image":"alpine:3.20","idle":true}},"access":true,"networks":{"office":null}}"#;
+    /// A Linux VM with steps but no port: Docker builds it as a container.
+    const TOOLS_VM: &str = r#""tools":{"kind":{"vm":{"os":"debian@12","provision":["provision/tools.sh"]}},"networks":{"office":null}}"#;
+    /// A VM whose steps install a service (a port), with nothing saying how it runs in the
+    /// foreground: Isoloom refuses it as a container.
+    const SERVICE_VM: &str = r#""db":{"kind":{"vm":{"os":"debian@12","provision":["provision/db.sh"]}},"services":[{"port":5432}],"networks":{"office":null}}"#;
+    const KALI_VM: &str =
+        r#""kali":{"kind":{"vm":{"os":"kali"}},"access":true,"networks":{"office":null}}"#;
+
+    #[test]
+    fn each_lab_runs_on_the_runtime_that_fits_it() {
+        let cases: [(&str, String, Result<Runtime, RunError>); 5] = [
+            ("containers", containers(), Ok(Runtime::Docker)),
+            (
+                "drawn containers and a VM without a port",
+                compiled(&[WEB, TOOLS_VM, USER].join(",")),
+                Ok(Runtime::Docker),
+            ),
+            (
+                "an OS machine beside a Windows VM",
+                WITH_VM.into(),
+                Ok(Runtime::Vagrant),
+            ),
+            (
+                "drawn VMs only",
+                compiled(&[SERVICE_VM, KALI_VM].join(",")),
+                Ok(Runtime::Vagrant),
+            ),
+            // The drawn containers are plain images, which have no VM form.
+            (
+                "a service VM beside plain images",
+                compiled(&[WEB, SERVICE_VM, USER].join(",")),
+                Err(RunError::NoLocalTarget),
+            ),
+        ];
+        for (what, yaml, runs_on) in cases {
+            let got = generated(&lab_of(&yaml).unwrap()).map(|(rt, _)| rt);
+            assert_eq!(got, runs_on, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_lab_of_containers_is_prepared_for_docker() {
+        let dir = TempDir::new("prepare");
+        let spec = prepare(&dir, &containers(), &[]).unwrap();
+        assert_eq!(spec.name, "pair");
+        // What starting, reading and stopping it use: its runtime, its Compose file, its spec.
+        assert_eq!(runtime(&dir), Runtime::Docker);
+        assert!(prepared(&dir));
+        assert_eq!(
+            lab_spec(&dir).unwrap().machines.keys().collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        let compose: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            &std::fs::read_to_string(dir.join(".isoloom/docker/compose.yml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(compose["name"].as_str(), Some("pair"));
+        for machine in ["a", "b"] {
+            assert!(compose["services"].get(machine).is_some(), "{machine}");
+        }
     }
 
     #[test]
     fn a_drawn_lab_runs_as_the_compiler_writes_it() {
-        // A drawn Linux VM with steps but no port is its OS and its steps: Docker builds it as a
-        // container, so a lab of containers and such VMs runs on Docker.
-        let yaml = compiled(
-            r#"{"name":"drawn","networks":{"office":{"cidr":"10.10.1.0/24"}},"nodes":{
-              "web":{"kind":{"container":{"image":"nginx:1.27-alpine"}},"services":[{"port":80,"protocol":"http"}],"networks":{"office":null}},
-              "tools":{"kind":{"vm":{"os":"debian@12","provision":["provision/tools.sh"]}},"networks":{"office":null}},
-              "user":{"kind":{"container":{"image":"alpine:3.20","idle":true}},"access":true,"networks":{"office":null}}}}"#,
-        );
+        let yaml = compiled(&[WEB, TOOLS_VM, USER].join(","));
         let dir = TempDir::new("drawn");
         let own = [("provision/tools.sh".to_owned(), "#!/bin/sh\n".to_owned())];
         let spec = prepare(&dir, &yaml, &own).unwrap();
@@ -185,67 +236,31 @@ machines:
     }
 
     #[test]
-    fn a_drawn_service_vm_runs_on_vagrant_without_a_plain_image_beside_it() {
-        // Its steps install a service (a port) and nothing says how it runs in the foreground:
-        // Isoloom refuses it as a container. The drawn containers are plain images (the compiler
-        // writes `app.image`), which have no VM form: no local target runs the lab, and the app
-        // says to export it.
-        let yaml = compiled(
-            r#"{"name":"drawn","networks":{"office":{"cidr":"10.10.1.0/24"}},"nodes":{
-              "web":{"kind":{"container":{"image":"nginx:1.27-alpine"}},"services":[{"port":80,"protocol":"http"}],"networks":{"office":null}},
-              "db":{"kind":{"vm":{"os":"debian@12","provision":["provision/db.sh"]}},"services":[{"port":5432}],"networks":{"office":null}},
-              "user":{"kind":{"container":{"image":"alpine:3.20","idle":true}},"access":true,"networks":{"office":null}}}}"#,
+    fn a_lab_with_vms_needs_vagrant_installed() {
+        assert_eq!(
+            runnable(Runtime::Vagrant, false),
+            Err(RunError::VagrantMissing)
         );
-        match generated(&lab_of(&yaml).unwrap()) {
-            Err(RunError::NotDocker(why)) => assert!(why.contains("export it"), "{why}"),
-            other => panic!("{:?}", other.map(|(rt, _)| rt)),
-        }
-        // Only VMs: Vagrant.
-        let vms = compiled(
-            r#"{"name":"drawn","networks":{"office":{"cidr":"10.10.1.0/24"}},"nodes":{
-              "db":{"kind":{"vm":{"os":"debian@12","provision":["provision/db.sh"]}},"services":[{"port":5432}],"networks":{"office":null}},
-              "user":{"kind":{"vm":{"os":"kali"}},"access":true,"networks":{"office":null}}}}"#,
-        );
-        let (rt, _) = generated(&lab_of(&vms).unwrap()).unwrap();
-        assert_eq!(rt, Runtime::Vagrant);
+        assert_eq!(runnable(Runtime::Vagrant, true), Ok(()));
+        assert_eq!(runnable(Runtime::Docker, false), Ok(()));
     }
 
     #[test]
-    fn a_lab_with_vms_runs_with_vagrant() {
-        let (rt, files) = generated(&lab_of(WITH_VM).unwrap()).unwrap();
-        assert_eq!(rt, Runtime::Vagrant);
-        assert!(
-            files
-                .iter()
-                .any(|f| f.path == ".isoloom/vagrant/Vagrantfile")
-        );
-        // A plain image has no VM form: beside a Windows VM, no target runs the lab, and
-        // Isoloom says why.
-        let image = WITH_VM.replace(
-            "    os: debian@12\n",
-            "    app: { image: \"alpine:3.20\" }\n",
-        );
-        match prepare(&TempDir::new("image"), &image, &[]) {
-            Err(RunError::Spec(why)) => assert!(why.contains("no target is possible"), "{why}"),
-            other => panic!("{other:?}"),
-        }
-        // Prepared: the runtime is recorded and the Vagrantfile found (when Vagrant is installed).
+    fn a_lab_with_vms_is_prepared_for_vagrant() {
         let dir = TempDir::new("vm");
-        match prepare(&dir, WITH_VM, &[]) {
-            Ok(_) => {
-                assert_eq!(runtime(&dir), Runtime::Vagrant);
-                assert!(prepared(&dir));
-            }
-            Err(e) => assert!(!has("vagrant") && e.to_string().contains("Vagrant"), "{e}"),
-        }
+        let lab = lab_of(WITH_VM).unwrap();
+        let (rt, files) = generated(&lab).unwrap();
+        write_lab(&dir, WITH_VM, rt, &files, &[]).unwrap();
+        assert_eq!(runtime(&dir), Runtime::Vagrant);
+        assert!(prepared(&dir), "its Vagrantfile is where the app looks");
     }
 
     #[test]
-    fn the_labs_own_files_stay_inside_it() {
+    fn the_labs_own_files_are_written_inside_it_only() {
         let dir = TempDir::new("own");
         prepare(
             &dir,
-            CONTAINERS,
+            &containers(),
             &[("configs/r1.cfg".into(), "hostname r1\n".into())],
         )
         .unwrap();
@@ -253,21 +268,36 @@ machines:
             std::fs::read_to_string(dir.join("configs/r1.cfg")).unwrap(),
             "hostname r1\n"
         );
-        for bad in ["../escape.sh", "/etc/passwd", "a/../../b"] {
-            assert!(
-                prepare(&dir, CONTAINERS, &[(bad.into(), String::new())]).is_err(),
-                "{bad}"
-            );
-        }
+        // Which paths are inside: lab_files' table. Here: a path outside refuses the whole lab.
+        let refused = TempDir::new("own-refused");
+        let err = prepare(
+            &refused,
+            &containers(),
+            &[("../x.sh".into(), String::new())],
+        );
+        assert_eq!(err.unwrap_err(), RunError::NotInsideLab("../x.sh".into()));
+        assert_eq!(
+            std::fs::read_dir(&*refused).unwrap().count(),
+            0,
+            "nothing written"
+        );
     }
 
     #[test]
-    fn an_invalid_spec_is_refused_with_its_problems() {
-        let err = prepare(
-            &TempDir::new("bad"),
-            "version: 1\nname: x\nnetworks: {}\nmachines: {}\n",
-            &[],
+    fn a_lab_isoloom_finds_problems_in_is_refused_with_them() {
+        // A plain image has no VM form: beside a Windows VM, no target runs the lab.
+        let image_beside_windows = WITH_VM.replace(
+            "    os: debian@12\n",
+            "    app: { image: \"alpine:3.20\" }\n",
         );
-        assert!(matches!(err, Err(RunError::Spec(_))));
+        let no_machine = "version: 1\nname: x\nnetworks: {}\nmachines: {}\n".to_string();
+        for yaml in [image_beside_windows, no_machine] {
+            let dir = TempDir::new("bad");
+            match prepare(&dir, &yaml, &[]) {
+                Err(RunError::Spec(problems)) => assert!(!problems.is_empty(), "{yaml}"),
+                other => panic!("{other:?} for {yaml}"),
+            }
+            assert!(!dir.join("isoloom.yml").exists(), "nothing written");
+        }
     }
 }

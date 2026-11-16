@@ -20,6 +20,13 @@ pub fn prefix_of(cidr: &str) -> Option<String> {
     Some(format!("{head}."))
 }
 
+/// The prefix of an IPv4 block, checked to be digits and dots only (it goes into a script).
+pub fn ipv4_prefix(cidr: &str) -> Result<String, RunError> {
+    prefix_of(cidr)
+        .filter(|p| p.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .ok_or_else(|| RunError::NotIpv4(cidr.into()))
+}
+
 /// The shell that finds the interface whose address starts with `prefix`, in `$IF` (a VLAN's
 /// `eth1.10@eth1` without its parent), or fails. The prefix is checked by the caller to be
 /// digits and dots only, so it can't break out of the quotes.
@@ -55,10 +62,8 @@ pub fn plan_capture(dir: &Path, spec: &Spec, network: &str) -> Result<CapturePla
     let net = spec
         .networks
         .get(network)
-        .ok_or_else(|| RunError::Spec(format!("the lab has no network `{network}`")))?;
-    let prefix = prefix_of(&net.cidr)
-        .filter(|p| p.chars().all(|c| c.is_ascii_digit() || c == '.'))
-        .ok_or_else(|| RunError::Spec(format!("`{}` isn't an IPv4 block", net.cidr)))?;
+        .ok_or_else(|| RunError::NoNetwork(network.clone()))?;
+    let prefix = ipv4_prefix(&net.cidr)?;
     match runtime(dir) {
         Runtime::Docker => docker_plan(dir, spec, network, prefix),
         Runtime::Vagrant => vm_plan(dir, spec, network, prefix),
@@ -77,7 +82,10 @@ fn vm_plan(
         .iter()
         .find(|(_, m)| m.networks.contains_key(network))
         .map(|(name, _)| name.clone())
-        .ok_or_else(|| RunError::Spec(format!("no machine is on `{network}`")))?;
+        .ok_or_else(|| RunError::NobodyOn {
+            network: network.into(),
+            containers: false,
+        })?;
     Ok(CapturePlan {
         container: String::new(),
         prefix,
@@ -97,13 +105,14 @@ fn docker_plan(
         .iter()
         .find(|(_, m)| m.networks.contains_key(network) && m.docker.is_some())
         .map(|(name, _)| name.clone())
-        .ok_or_else(|| RunError::Spec(format!("no container is on `{network}`")))?;
+        .ok_or_else(|| RunError::NobodyOn {
+            network: network.into(),
+            containers: true,
+        })?;
     let id = run(compose(dir, &["ps", "-q", &machine]), "Finding the machine")?;
     let container = id.lines().next().unwrap_or("").trim().to_string();
     if container.is_empty() {
-        return Err(RunError::Spec(format!(
-            "`{machine}` isn't running: start the lab first"
-        )));
+        return Err(RunError::NotRunning(machine));
     }
     Ok(CapturePlan {
         container,
@@ -258,6 +267,14 @@ mod tests {
     fn the_capture_finds_the_interface_by_its_network() {
         assert_eq!(prefix_of("10.10.1.0/24").as_deref(), Some("10.10.1."));
         assert_eq!(prefix_of("10.200.0.8/29").as_deref(), Some("10.200.0."));
+        // What goes into a script is digits and dots only.
+        for cidr in ["fd00::/64", "10.10.1'x.0/24"] {
+            assert_eq!(
+                ipv4_prefix(cidr),
+                Err(RunError::NotIpv4(cidr.into())),
+                "{cidr}"
+            );
+        }
         let script = capture_script("10.10.1.");
         assert!(script.contains("p='10.10.1.'"));
         assert!(script.contains("exec tcpdump -i \"$IF\" -U -w -"));

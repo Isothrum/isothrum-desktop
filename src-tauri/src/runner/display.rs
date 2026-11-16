@@ -15,7 +15,7 @@ use std::process::Command;
 
 use isoloom_spec::model::Spec;
 
-use super::{CAPTURE_IMAGE, RunError, Runtime, container, run, runtime};
+use super::{CAPTURE_IMAGE, NoScreen, RunError, Runtime, container, run, runtime};
 
 /// The label that marks a lab's VNC forwarders (its value: the lab's folder name).
 const LABEL: &str = "isothrum.vnc";
@@ -23,7 +23,7 @@ const LABEL: &str = "isothrum.vnc";
 /// Opens `machine`'s screen; returns what was opened (a `vnc://` address, or the VM's window).
 pub fn open_display(dir: &Path, spec: &Spec, machine: &str) -> Result<String, RunError> {
     if !spec.machines.contains_key(machine) {
-        return Err(RunError::Spec(format!("no machine named `{machine}`")));
+        return Err(RunError::NoMachine(machine.into()));
     }
     match runtime(dir) {
         Runtime::Docker => container_display(dir, machine),
@@ -126,16 +126,15 @@ fn container_display(dir: &Path, machine: &str) -> Result<String, RunError> {
     let id = container(dir, machine)?;
     let mut c = Command::new("docker");
     c.args(["inspect", "-f", "{{json .Config.ExposedPorts}}", &id]);
-    let port = vnc_port(&run(c, "Reading its ports")?).ok_or_else(|| {
-        RunError::Spec(format!(
-            "`{machine}` has no screen: its image runs no VNC server (none of its ports is in \
-             5900–5999). Open its console instead."
-        ))
-    })?;
+    let no_screen = |why| RunError::NoScreen {
+        machine: machine.into(),
+        why,
+    };
+    let port = vnc_port(&run(c, "Reading its ports")?).ok_or(no_screen(NoScreen::NoVncServer))?;
     let (network, ip) = networks(&id)?
         .into_iter()
         .next()
-        .ok_or_else(|| RunError::Spec(format!("`{machine}` is on no network")))?;
+        .ok_or(no_screen(NoScreen::NoNetwork))?;
     let url = format!("vnc://{}", forward(dir, machine, &network, &ip, port)?);
     crate::terminal::open_url(&url)?;
     Ok(url)
@@ -163,15 +162,18 @@ fn vm_display(dir: &Path, machine: &str) -> Result<String, RunError> {
         c.args(["-c", "qemu:///system", "domdisplay", &id]);
         let url = run(c, "Finding the VM's display")?.trim().to_string();
         if url.is_empty() {
-            return Err(RunError::Spec(format!("`{machine}` has no display")));
+            return Err(RunError::NoScreen {
+                machine: machine.into(),
+                why: NoScreen::NoDisplay,
+            });
         }
         crate::terminal::open_url(&url)?;
         return Ok(url);
     }
-    Err(RunError::Spec(format!(
-        "`{machine}` isn't running, or its provider shows no screen from here (VirtualBox and \
-         libvirt do): open its console instead"
-    )))
+    Err(RunError::NoScreen {
+        machine: machine.into(),
+        why: NoScreen::NotShown,
+    })
 }
 
 /// Removes the lab's VNC forwarders (the lab is stopping).
