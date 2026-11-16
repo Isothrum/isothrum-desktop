@@ -26,13 +26,15 @@ strip = true
 
 [lib]
 name = "isothrum_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# The app's own binary links it: no mobile build, so no staticlib or cdylib (a Windows DLL of
+# this crate would export more symbols than the format allows).
+crate-type = ["rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7.0", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2.12.0", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Isoloom's crates (3.0): the spec the editor's compiler writes, the lab it
