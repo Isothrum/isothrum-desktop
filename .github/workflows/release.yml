@@ -21,9 +21,14 @@ permissions:
   contents: read
 
 jobs:
+  # The check (gate.yml): a tag doesn't run it otherwise, and nothing is built unless it passes.
+  gate:
+    uses: ./.github/workflows/gate.yml
+
   # The draft release, made once before the builds so the matrix legs only upload to it (no two
   # platform jobs racing to create the same release). Uses the workflow's GITHUB_TOKEN.
   prepare:
+    needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

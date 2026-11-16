@@ -5,7 +5,9 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "editor": "node scripts/editor.mjs"
+    "editor": "node scripts/editor.mjs",
+    "check": "node scripts/check.mjs",
+    "check:real": "cargo test --manifest-path src-tauri/Cargo.toml -- --ignored"
   },
   "dependencies": {
     "@isothrum/editor": "^1.0.0"
