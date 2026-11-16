@@ -69,10 +69,15 @@ npm run editor                                       # the bundled editor, from 
                                                      # (or ISOTHRUM_WEBSITE=/path/to/isothrum-website)
 npm run dev                                          # the app on the bundled editor
 ISOTHRUM_URL=http://localhost:3000/en npm run dev    # against a local build of the website
-cd src-tauri && cargo test                           # the app's tests
-cd src-tauri && sg docker -c "cargo test -- --ignored"   # its tests that need Docker (and Vagrant)
+npm run check                                        # the editor, rustfmt, clippy and the tests: what CI runs
+npm run check -- --only clippy,test                  # some of its steps (--list names them)
+sg docker -c "npm run check:real"                    # the tests that need Docker (and Vagrant)
 npm run build                                        # .deb / AppImage / .dmg / .msi
 ```
+
+CI runs the check and nothing else: `ci.yml` on pull requests into `dev`, `gate.yml` before `main`
+and before a release (`release.yml` builds nothing unless it passes), each on Linux, macOS and
+Windows. The tests that need Docker or Vagrant run on the maintainers' test machines.
 
 ## Release
 

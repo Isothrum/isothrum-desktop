@@ -1,0 +1,29 @@
+name: Setup
+description: >-
+  What the check needs on a runner: Tauri's Linux libraries (on Linux), Node 22 with the npm
+  cache and `npm ci`, and stable Rust with clippy and rustfmt, its build cached. Shared by ci.yml
+  and gate.yml; the pinned action SHAs live here.
+runs:
+  using: composite
+  steps:
+    - if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: "22"
+        cache: npm
+    - shell: bash
+      run: npm ci
+    - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      with:
+        toolchain: stable
+        components: clippy, rustfmt
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        workspaces: src-tauri
+        # Only main writes the cache, so a pull request can't seed what it builds with.
+        save-if: ${{ github.ref == 'refs/heads/main' }}
