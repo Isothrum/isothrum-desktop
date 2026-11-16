@@ -19,13 +19,35 @@ workflow never publishes on its own, and no release is cut by building.
 | Platform | Installers | Runner |
 | --- | --- | --- |
 | Linux | `.deb`, `.AppImage` | `ubuntu-22.04` |
-| macOS | `.dmg` (universal: aarch64 + x86_64) | `macos-latest` |
+| macOS | `.dmg`, one for Apple Silicon, one for Intel | `macos-latest` |
 | Windows | `.msi` | `windows-latest` |
 
 `latest.json` plus the per-platform update bundles and their `.sig` signatures are attached when
 the updater key is set (see below). The updater endpoint is baked into `tauri.conf.json`
-(`https://github.com/isoloom/isothrum/releases/latest/download/latest.json`) and resolves once the
-repository is public and the release is published (not a draft).
+(`https://github.com/Isothrum/isothrum-desktop/releases/latest/download/latest.json`) and resolves
+once the release is published (not a draft).
+
+Beside the installers, the draft carries:
+
+| Job | What |
+| --- | --- |
+| `sbom` | CycloneDX SBOMs: `isothrum-desktop-rust.cdx.json` (cargo-cyclonedx, every target) and `isothrum-desktop-npm.cdx.json` (`npm sbom`, without the build-only packages) |
+| `attest` | `SHA256SUMS` of every asset, signed keylessly with cosign (`SHA256SUMS.sigstore.json`: the certificate names `release.yml` at the tag, recorded in Sigstore's public log, checked in the job); a build provenance attestation of each asset; an attestation of each SBOM of each installer |
+
+A user checks a download as [README.md](README.md#verify-a-download) says. None of these needs a
+secret: they sign with the workflow's own identity (OIDC, `id-token: write`).
+
+## What each build signs
+
+| Platform | Signature | Checked in the build |
+| --- | --- | --- |
+| Windows | Authenticode through Azure Artifact Signing (`trusted-signing-cli`, pinned): the app and the MSI | `Get-AuthenticodeSignature` is `Valid` on each |
+| macOS | Developer ID Application certificate; the app notarized and stapled by tauri-action, each DMG notarized and stapled after (tag builds) | `codesign --verify --deep --strict`, `spctl -a` (app and DMG) |
+| Updates | minisign with the updater key: the `.sig` beside each update bundle, and `latest.json` | by the installed app, against the public key in `tauri.conf.json` |
+| Store | Microsoft signs the MSIX | |
+
+A build signs what it has secrets for; on a tag, the `prepare` job names any signing secret that
+isn't set, in a warning, before building.
 
 ## Secrets
 
@@ -37,7 +59,6 @@ Set these under **Settings → Secrets and variables → Actions**. None is prin
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | The updater signing key (minisign). Signs each update bundle so the installed app accepts the update. Its **public** half is in `tauri.conf.json` under `plugins.updater.pubkey` and the two must match. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password set when the key was generated (empty string if the key has none — still set the secret). |
-| `WEBSITE_REPO_TOKEN` | A read-only token for `Isothrum/isothrum-website`, from which the bundled editor is built. Needed only while that repository is private; once public, the workflow's default `github.token` is enough. |
 
 If `TAURI_SIGNING_PRIVATE_KEY` is absent the build still succeeds, but it produces **no** update
 signatures or `latest.json`, so the auto-updater cannot verify an update. A build like that is fine
@@ -53,21 +74,22 @@ warns on first open and the updater is not notarized.
 | `APPLE_CERTIFICATE` | Developer ID Application certificate, exported as a `.p12` and base64-encoded. |
 | `APPLE_CERTIFICATE_PASSWORD` | The `.p12` export password. |
 | `APPLE_SIGNING_IDENTITY` | The certificate's name, e.g. `Developer ID Application: Your Name (TEAMID)`. |
-| `APPLE_ID` | The Apple ID used for notarization. |
-| `APPLE_PASSWORD` | An app-specific password for that Apple ID. |
-| `APPLE_TEAM_ID` | The Apple Developer team id. |
+| `APPLE_API_KEY_P8` | The App Store Connect API key used to notarize (`.p8`, base64-encoded). |
+| `APPLE_API_KEY_ID` | That key's id. |
+| `APPLE_API_ISSUER` | That key's issuer id. |
 
 ### Optional — Windows signing
 
-Without these, Windows `.msi` builds are **unsigned** (SmartScreen warns on install).
+Without these, Windows `.msi` builds are **unsigned** (SmartScreen warns on install). The workflow
+signs through Azure Artifact Signing (`trusted-signing-cli`), as the Cyber CTF launcher does.
 
 | Secret | Purpose |
 | --- | --- |
-| `WINDOWS_CERTIFICATE` | Code-signing certificate as a `.pfx`, base64-encoded. |
-| `WINDOWS_CERTIFICATE_PASSWORD` | The `.pfx` password. |
+| `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` | The Entra ID app allowed to sign with the Artifact Signing account. |
+| `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` | The Artifact Signing endpoint (e.g. `https://weu.codesigning.azure.net`), account and certificate profile. |
 
-When both are set the workflow imports the certificate and passes its thumbprint to Tauri with a
-DigiCert timestamp; when either is absent, signing is skipped.
+When `AZURE_CLIENT_ID` is set the app and the MSI are signed and their signatures checked; when it
+is absent, signing is skipped.
 
 ## Generating the updater keypair
 
@@ -96,8 +118,7 @@ npm install
 npm run build        # runs `npm run editor`, then bundles .deb/.AppImage/.dmg/.msi for this OS
 ```
 
-The editor is built from the website checkout. By default `npm run editor` looks for
-`../../../isothrum-website`; point it elsewhere with `ISOTHRUM_WEBSITE=/path/to/isothrum-website`.
-A local bundle is unsigned unless you export the signing variables above into your shell. To skip
+The editor comes from the `@isothrum/editor` package (`npm run editor` copies its prebuilt
+bundle). A local bundle is unsigned unless you export the signing variables above into your shell. To skip
 bundling (binary + editor only, when you lack signing secrets), run `cargo tauri build --no-bundle`
 from `src-tauri`.
