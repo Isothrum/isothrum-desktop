@@ -35,7 +35,7 @@ pub use snapshots::{Snapshot, delete_snapshot, snapshots, take_snapshot, use_sna
 
 /// Why a command couldn't do what the editor asked. The editor shows its text; the tests match
 /// its variant.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunError {
     /// The YAML isn't an Isoloom spec, or Isoloom finds problems in it (in its words).
     Spec(String),

@@ -82,7 +82,9 @@ Windows. The tests that need Docker or Vagrant run on the maintainers' test mach
 ## Tests
 
 - **Where**: a module's tests are at the bottom of its own file, in `#[cfg(test)] mod tests`, and
-  test that file's functions: what `runner/links.rs` does is tested in `runner/links.rs`.
+  test that file's functions: what `runner/links.rs` does is tested in `runner/links.rs`. The
+  editor's commands are tested in `commands.rs`, where their bodies are, as functions of the
+  app's data folder: `lib.rs` only finds that folder and runs them off the window's thread.
 - **Shared helpers** are in `src-tauri/src/test_support.rs` (built for tests only): `TempDir` (a
   folder of the test's own, removed when it ends), `LabYaml` (an isoloom.yml from networks and
   machines), `Started` (a lab started, and stopped when the test ends, even failing),
