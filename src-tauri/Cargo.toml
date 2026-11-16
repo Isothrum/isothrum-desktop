@@ -46,3 +46,5 @@ tauri-plugin-updater = "2"
 [dev-dependencies]
 # The tests run what the editor's compiler writes (Isoloom's topology compiler).
 isoloom-topology = "3.0.0"
+# Reads the Compose file Isoloom writes, as Compose does (already in the graph, through it).
+serde_yaml_ng = "0.10"
