@@ -18,10 +18,7 @@ pub fn running_container(dir: &Path, machine: &str) -> Result<Option<String>, Ru
 
 /// The machine's container in the running lab.
 pub fn container(dir: &Path, machine: &str) -> Result<String, RunError> {
-    running_container(dir, machine)?.ok_or_else(|| RunError::Command {
-        what: format!("`{machine}`"),
-        output: "isn't running".into(),
-    })
+    running_container(dir, machine)?.ok_or_else(|| RunError::NotRunning(machine.into()))
 }
 
 /// A container's shell: bash when it has it, else sh.
@@ -33,7 +30,7 @@ pub fn console_command(dir: &Path, spec: &Spec, machine: &str) -> Result<Console
     let m = spec
         .machines
         .get(machine)
-        .ok_or_else(|| RunError::Spec(format!("no machine named `{machine}`")))?;
+        .ok_or_else(|| RunError::NoMachine(machine.into()))?;
     if runtime(dir) == Runtime::Vagrant {
         return Ok(super::vagrant::console_command(dir, machine));
     }
@@ -50,10 +47,8 @@ pub fn console_command(dir: &Path, spec: &Spec, machine: &str) -> Result<Console
 /// container on the management network: under Docker Desktop (macOS, Windows) the host can't
 /// reach container addresses.
 fn appliance_console(id: &str, machine: &str) -> Result<Console, RunError> {
-    let (network, ip) = management_address(id)?.ok_or_else(|| RunError::Command {
-        what: format!("`{machine}`"),
-        output: "has no management address".into(),
-    })?;
+    let (network, ip) =
+        management_address(id)?.ok_or_else(|| RunError::NoManagementAddress(machine.into()))?;
     Ok(Console::new(&[
         "docker",
         "run",
@@ -99,7 +94,7 @@ pub fn machine_action(
     action: &str,
 ) -> Result<String, RunError> {
     if !spec.machines.contains_key(machine) {
-        return Err(RunError::Spec(format!("no machine named `{machine}`")));
+        return Err(RunError::NoMachine(machine.into()));
     }
     let out = if runtime(dir) == Runtime::Vagrant {
         super::vagrant::action(dir, machine, action)?
@@ -115,37 +110,35 @@ pub fn machine_action(
 
 /// Starts, stops or restarts one machine's Compose services (itself and its sidecar).
 fn compose_action(dir: &Path, machine: &str, action: &str) -> Result<String, RunError> {
+    const STOP: (&[&str], &str) = (&["stop"], "Stopping the machine");
+    const START: (&[&str], &str) = (&["up", "-d", "--no-deps"], "Starting the machine");
+    let steps: &[(&[&str], &str)] = match action {
+        "start" => &[START],
+        "stop" => &[STOP],
+        "restart" => &[STOP, START],
+        other => return Err(unknown_machine_action(other)),
+    };
     let services = with_sidecar(dir, machine)?;
     let names: Vec<&str> = services.iter().map(String::as_str).collect();
-    match action {
-        "start" => run(
-            compose(dir, &[&["up", "-d", "--no-deps"][..], &names].concat()),
-            "Starting the machine",
-        ),
-        "stop" => run(
-            compose(dir, &[&["stop"][..], &names].concat()),
-            "Stopping the machine",
-        ),
-        "restart" => {
-            run(
-                compose(dir, &[&["stop"][..], &names].concat()),
-                "Stopping the machine",
-            )?;
-            run(
-                compose(dir, &[&["up", "-d", "--no-deps"][..], &names].concat()),
-                "Starting the machine",
-            )
-        }
-        other => Err(RunError::Spec(format!(
-            "unknown action `{other}`: start, stop or restart"
-        ))),
+    let mut out = String::new();
+    for (args, what) in steps {
+        out = run(compose(dir, &[args, &names[..]].concat()), what)?;
     }
+    Ok(out)
 }
 
 /// The Compose service that sets a machine's routes, as Isoloom names it (3.0:
 /// `isoloom-routes-<machine>`, a prefix no machine's name can take).
 pub fn routes_sidecar(machine: &str) -> String {
     format!("isoloom-routes-{machine}")
+}
+
+/// What a machine can be asked to do, as `machine_action` says when asked anything else.
+pub fn unknown_machine_action(action: &str) -> RunError {
+    RunError::UnknownAction {
+        action: action.into(),
+        expected: "start, stop or restart",
+    }
 }
 
 /// The machine and its network sidecar, as Compose services.
@@ -212,6 +205,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_machine_or_an_action_the_lab_hasnt_is_refused_before_anything_runs() {
+        // An empty folder: had anything run, `docker compose` would have found no Compose file
+        // (or `vagrant` no Vagrantfile), and the error would be that command's.
+        let dir = TempDir::new("refused");
+        let yaml = LabYaml::named("refused")
+            .network("a", "10.61.1.0/24")
+            .machine("pc", &[("a", 10)])
+            .build();
+        let spec = crate::runner::spec_for(&yaml, crate::runner::Runtime::Docker).unwrap();
+        let nobody = RunError::NoMachine("nobody".into());
+        assert_eq!(
+            machine_action(&dir, &spec, "nobody", "stop").unwrap_err(),
+            nobody
+        );
+        assert_eq!(console_command(&dir, &spec, "nobody").unwrap_err(), nobody);
+        assert_eq!(
+            crate::runner::open_display(&dir, &spec, "nobody").unwrap_err(),
+            nobody
+        );
+        for runtime in ["docker", "vagrant"] {
+            std::fs::write(dir.join("runtime"), runtime).unwrap();
+            assert_eq!(
+                machine_action(&dir, &spec, "pc", "reboot").unwrap_err(),
+                unknown_machine_action("reboot"),
+                "{runtime}"
+            );
+        }
+    }
+
     /// A machine's console and starting/stopping it alone.
     #[test]
     #[ignore = "needs Docker"]
@@ -251,6 +274,5 @@ mod tests {
         )
         .unwrap();
         assert!(routes.contains("10.61.2.0/24 via"), "{routes}");
-        assert!(machine_action(&dir, &spec, "nobody", "stop").is_err());
     }
 }

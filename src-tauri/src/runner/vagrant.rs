@@ -83,11 +83,7 @@ pub fn action(lab: &Path, machine: &str, action: &str) -> Result<String, RunErro
         "start" => (&["up", machine], "Starting the machine"),
         "stop" => (&["halt", machine], "Stopping the machine"),
         "restart" => (&["reload", machine], "Restarting the machine"),
-        other => {
-            return Err(RunError::Spec(format!(
-                "unknown action `{other}`: start, stop or restart"
-            )));
-        }
+        other => return Err(crate::runner::unknown_machine_action(other)),
     };
     run(vagrant(lab, args), what)
 }
