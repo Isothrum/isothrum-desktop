@@ -211,11 +211,11 @@ mod tests {
 
     #[test]
     fn a_vms_console_and_capture_go_over_vagrant_ssh() {
-        assert!(
-            console_command(Path::new("/lab"), "pc")
-                .sh_line()
-                .ends_with("vagrant ssh pc")
-        );
+        assert!(console_command(Path::new("/lab"), "pc").argv.ends_with(&[
+            "vagrant".to_owned(),
+            "ssh".to_owned(),
+            "pc".to_owned()
+        ]));
         let cap = capture_command(Path::new("/lab"), "pc", "tcpdump -w -");
         let args: Vec<String> = cap
             .get_args()
