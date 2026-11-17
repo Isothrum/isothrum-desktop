@@ -120,11 +120,9 @@ fn capture_stop(
 #[tauri::command]
 async fn machine_console(app: AppHandle, name: String, machine: String) -> Result<(), String> {
     let data = data_dir(&app)?;
-    blocking(move || {
-        let (title, console) = commands::machine_console(&data, &name, &machine)?;
-        terminal::open_terminal(&title, &console)
-    })
-    .await
+    let (title, console) =
+        blocking(move || commands::machine_console(&data, &name, &machine)).await?;
+    Ok(terminal::open_terminal(&title, &console).await?)
 }
 
 /// Opens one machine's screen (GNS3's VNC console): a container's VNC server, or a VM's display.
