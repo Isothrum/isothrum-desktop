@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Isothrum",
+  "version": "1.1.0",
+  "identifier": "com.isothrum.desktop",
+  "build": {
+    "frontendDist": "../editor",
+    "beforeBuildCommand": "npm run editor"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb",
+      "appimage",
+      "app",
+      "dmg",
+      "msi"
+    ],
+    "category": "DeveloperTool",
+    "publisher": "Cyber Courses",
+    "shortDescription": "Draw network labs, run them, capture their traffic.",
+    "longDescription": "Isothrum runs the network labs you design in Isoloom: it brings the machines up, wires their networks, runs the checks and captures their traffic, all from your desktop.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBMjkyQTU0NEFFNTZDRDAKUldUUWJPVktWQ29wMmhOcGlla3F4bXVvRkdvSTRDL3NpRVRrUHZzajVJZGl0RXJsT1RRYkNSSVoK",
+      "endpoints": [
+        "https://github.com/Isothrum/isothrum-desktop/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

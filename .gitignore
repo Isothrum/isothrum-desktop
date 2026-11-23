@@ -1,0 +1,8 @@
+# Rust build output
+/src-tauri/target/
+# Node
+/node_modules/
+# The editor bundle copied in by `npm run editor` (from @isothrum/editor)
+/editor/
+# The local Cargo configuration (a [patch] onto local Isoloom sources, a target folder)
+/.cargo/
